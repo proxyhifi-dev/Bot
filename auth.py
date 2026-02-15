@@ -1,29 +1,39 @@
 import os
-import pyotp
-from dotenv import load_dotenv
+from fyers_apiv3 import fyersModel
+from dotenv import load_dotenv, set_key
 
 load_dotenv()
 
-client_id = os.getenv("FYERS_CLIENT_ID")
-totp_key = os.getenv("FYERS_TOTP_KEY")
+def exchange_token(auth_code):
+    """Exchanges auth_code for access_token and updates .env"""
+    client_id = os.getenv("FYERS_CLIENT_ID")
+    secret_key = os.getenv("FYERS_SECRET_KEY")
+    redirect_uri = os.getenv("FYERS_REDIRECT_URI")
 
-print("DEBUG CLIENT_ID :", client_id)
-print("DEBUG TOTP_KEY  :", totp_key)
+    # Initialize session for exchange
+    session = fyersModel.SessionModel(
+        client_id=client_id,
+        secret_key=secret_key,
+        redirect_uri=redirect_uri,
+        response_type="code",
+        grant_type="authorization_code"
+    )
 
-if not totp_key:
-    raise Exception("❌ FYERS_TOTP_KEY is missing in .env")
+    # Set the auth_code and generate token
+    session.set_token(auth_code)
+    response = session.generate_token()
 
-try:
-    totp = pyotp.TOTP(totp_key)
-    otp = totp.now()
-    print("✅ Current TOTP:", otp)
-except Exception as e:
-    raise Exception(f"❌ Invalid TOTP Secret Key: {e}")
+    if "access_token" in response:
+        token = response["access_token"]
+        # Save to .env automatically
+        set_key(".env", "FYERS_ACCESS_TOKEN", token)
+        print("✅ Access Token generated and saved to .env")
+        return token
+    else:
+        print(f"❌ Exchange Failed: {response}")
+        return None
 
-print(
-    "1. Login here:",
-    f"https://api-t1.fyers.in/api/v3/generate-authcode"
-    f"?client_id={client_id}"
-    f"&redirect_uri=http://localhost:4200/auth/fyers/callback"
-    f"&response_type=code&state=state123"
-)
+if __name__ == "__main__":
+    # Paste your long auth_code here or use input()
+    code = input("Paste your auth_code: ")
+    exchange_token(code)
