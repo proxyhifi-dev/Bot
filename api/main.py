@@ -4,8 +4,8 @@ import logging
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from engine.mode import TradingMode
@@ -29,42 +29,6 @@ class ModeSwitchRequest(BaseModel):
 @app.get("/")
 def index():
     return FileResponse(Path("ui/index.html"))
-
-
-@app.get("/auth/login")
-def auth_login(state: str = "bot"):
-    """Step 1: open Fyers OAuth login URL."""
-    try:
-        return RedirectResponse(engine.fyers.get_login_url(state=state))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.get("/auth/callback")
-def auth_callback(code: str = Query(...), state: str = Query("bot")):
-    """Step 2: Fyers redirects here with auth code; we exchange and persist token."""
-    try:
-        token_resp = engine.fyers.exchange_auth_code(code)
-        engine.fyers.persist_access_token(".env")
-        return {
-            "status": "authenticated",
-            "state": state,
-            "token_saved": True,
-            "token_valid": engine.fyers.validate_token(),
-            "message": "Token exchanged and saved to .env as FYERS_ACCESS_TOKEN",
-            "raw": {k: v for k, v in token_resp.items() if k != "access_token"},
-        }
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"OAuth callback failed: {exc}") from exc
-
-
-@app.get("/auth/status")
-def auth_status():
-    return {
-        "configured": bool(engine.fyers.client_id and engine.fyers.secret_key and engine.fyers.redirect_uri),
-        "has_access_token": bool(engine.fyers.access_token),
-        "token_valid": engine.fyers.validate_token(),
-    }
 
 
 @app.get("/signal")

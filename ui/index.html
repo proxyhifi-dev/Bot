@@ -25,7 +25,6 @@
   <div class="card">
     <span id="modeBadge" class="mode-paper">PAPER MODE</span>
     <button class="warn" id="toggleMode">Switch Mode</button>
-    <button class="ok" id="authBtn">Authenticate Fyers</button>
     <button class="ok" id="approveBtn">Approve</button>
     <button class="no" id="rejectBtn">Reject</button>
   </div>
@@ -37,7 +36,6 @@
     <div class="card"><b>Pending Signal:</b> <span id="pending">-</span></div>
     <div class="card"><b>Approval Countdown:</b> <span id="countdown">0</span>s</div>
     <div class="card"><b>Win Rate:</b> <span id="winrate">0</span>%</div>
-    <div class="card"><b>Fyers Auth:</b> <span id="authStatus">UNKNOWN</span></div>
   </div>
 
   <div class="card" style="margin-top: 12px;">
@@ -73,9 +71,6 @@ async function refresh(){
   document.getElementById('countdown').textContent = st.approval_countdown;
   document.getElementById('winrate').textContent = Number(st.win_rate).toFixed(2);
 
-  const auth = await api('/auth/status');
-  document.getElementById('authStatus').textContent = auth.token_valid ? 'VALID' : 'INVALID';
-
   document.getElementById('toggleMode').disabled = !!st.position;
 
   const trades = await api('/trades');
@@ -90,8 +85,6 @@ async function refresh(){
 
 document.getElementById('approveBtn').onclick = async ()=>{ try { await api('/approve', 'POST'); await refresh(); } catch(e){ alert(e.message);} };
 document.getElementById('rejectBtn').onclick = async ()=>{ try { await api('/reject', 'POST'); await refresh(); } catch(e){ alert(e.message);} };
-
-document.getElementById('authBtn').onclick = ()=>{ window.open('/auth/login','_blank'); };
 
 document.getElementById('toggleMode').onclick = async ()=>{
   try {

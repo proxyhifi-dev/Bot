@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
-try:
-    import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-except ModuleNotFoundError:
-    requests = None
-    HTTPAdapter = None
-    Retry = None
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 class FyersAdapter:
-    """Fyers adapter with OAuth/token validation, retries and duplicate-order safety."""
+    """Official-Fyers style adapter with OAuth/token validation, retries and rate-limit handling."""
 
     def __init__(self):
         self.logger = logging.getLogger("fyers_adapter")
@@ -28,22 +21,16 @@ class FyersAdapter:
         self.access_token = os.getenv("FYERS_ACCESS_TOKEN", "")
         self.base_url = os.getenv("FYERS_BASE_URL", "https://api-t1.fyers.in")
 
-        if requests is None:
-            self.session = None
-        else:
-            self.session = requests.Session()
-            retries = Retry(
-                total=5,
-                backoff_factor=0.5,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["GET", "POST"],
-            )
-            self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        self._order_dedupe = set()
+        self.session = requests.Session()
+        retries = Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "POST"],
+        )
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
-    def _require_http_client(self) -> None:
-        if self.session is None:
-            raise RuntimeError("requests dependency is required for Fyers API calls. Install via requirements.txt")
+        self._order_dedupe = set()
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -51,26 +38,16 @@ class FyersAdapter:
             "Content-Type": "application/json",
         }
 
-    def _require_oauth_config(self) -> None:
-        if not self.client_id or not self.secret_key or not self.redirect_uri:
-            raise ValueError("Missing FYERS_CLIENT_ID/FYERS_SECRET_KEY/FYERS_REDIRECT_URI in environment")
-
-    def _app_id_hash(self) -> str:
-        self._require_oauth_config()
-        return hashlib.sha256(f"{self.client_id}:{self.secret_key}".encode()).hexdigest()
-
     def get_login_url(self, state: str = "bot") -> str:
-        self._require_oauth_config()
         return (
             "https://api-t1.fyers.in/api/v3/generate-authcode"
             f"?client_id={self.client_id}&redirect_uri={self.redirect_uri}&response_type=code&state={state}"
         )
 
     def exchange_auth_code(self, auth_code: str) -> Dict:
-        self._require_http_client()
         payload = {
             "grant_type": "authorization_code",
-            "appIdHash": self._app_id_hash(),
+            "appIdHash": self.client_id,
             "code": auth_code,
         }
         resp = self.session.post(f"{self.base_url}/api/v3/token", json=payload, timeout=10)
@@ -81,31 +58,9 @@ class FyersAdapter:
             self.access_token = token
         return data
 
-    def persist_access_token(self, env_path: str = ".env") -> bool:
-        """Persist token to .env so restarts keep LIVE auth."""
-        if not self.access_token:
-            return False
-
-        path = Path(env_path)
-        lines = path.read_text().splitlines() if path.exists() else []
-        key = "FYERS_ACCESS_TOKEN"
-        replaced = False
-        new_lines = []
-        for line in lines:
-            if line.startswith(f"{key}="):
-                new_lines.append(f"{key}={self.access_token}")
-                replaced = True
-            else:
-                new_lines.append(line)
-        if not replaced:
-            new_lines.append(f"{key}={self.access_token}")
-        path.write_text("\n".join(new_lines) + "\n")
-        return True
-
     def validate_token(self) -> bool:
         if not self.access_token or not self.client_id:
             return False
-        self._require_http_client()
         try:
             resp = self.session.get(
                 f"{self.base_url}/api/v3/profile", headers=self._headers(), timeout=10
@@ -114,12 +69,11 @@ class FyersAdapter:
                 return True
             self.logger.warning("Token validation failed status=%s body=%s", resp.status_code, resp.text)
             return False
-        except Exception as exc:
+        except requests.RequestException as exc:
             self.logger.error("Token validation error: %s", exc)
             return False
 
     def get_ltp(self, symbol: str) -> float:
-        self._require_http_client()
         payload = {"symbols": symbol}
         resp = self.session.get(
             f"{self.base_url}/data/quotes", params=payload, headers=self._headers(), timeout=10
@@ -131,14 +85,7 @@ class FyersAdapter:
             raise ValueError(f"LTP not available for {symbol}: {json.dumps(data)}")
         return float(ltp)
 
-    def get_history(
-        self,
-        symbol: str,
-        resolution: str = "5",
-        range_from: str = "1704067200",
-        range_to: str = "1706745600",
-    ) -> List[List[float]]:
-        self._require_http_client()
+    def get_history(self, symbol: str, resolution: str = "5", range_from: str = "1704067200", range_to: str = "1706745600") -> List[List[float]]:
         payload = {
             "symbol": symbol,
             "resolution": resolution,
@@ -155,7 +102,6 @@ class FyersAdapter:
         return data.get("candles", [])
 
     def place_order(self, order: Dict) -> Dict:
-        self._require_http_client()
         dedupe_key = f"{order.get('symbol')}|{order.get('side')}|{order.get('qty')}|{order.get('type')}"
         if dedupe_key in self._order_dedupe:
             raise ValueError("Duplicate order blocked")
@@ -170,7 +116,6 @@ class FyersAdapter:
         return resp.json()
 
     def get_positions(self) -> List[Dict]:
-        self._require_http_client()
         resp = self.session.get(
             f"{self.base_url}/api/v3/positions", headers=self._headers(), timeout=10
         )

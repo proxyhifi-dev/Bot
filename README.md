@@ -104,40 +104,6 @@ Open UI:
 
 ---
 
-
-## Fyers Authentication (Step-by-step)
-
-1. Set in `.env`:
-   - `FYERS_CLIENT_ID`
-   - `FYERS_SECRET_KEY`
-   - `FYERS_REDIRECT_URI=http://127.0.0.1:8000/auth/callback`
-
-2. Start app:
-
-```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
-
-3. Open in browser:
-
-```
-http://127.0.0.1:8000/auth/login
-```
-
-4. Login/consent in Fyers. Fyers will redirect to `/auth/callback` with `code`.
-
-5. Server exchanges code for access token and stores `FYERS_ACCESS_TOKEN` into `.env` automatically.
-
-6. Verify auth:
-
-```
-curl http://127.0.0.1:8000/auth/status
-```
-
-Expected: `token_valid: true` before switching to LIVE mode.
-
----
-
 ## How Mode Switching Works
 
 ### PAPER → LIVE
@@ -188,9 +154,6 @@ Dashboard supports:
 - `POST /mode/switch` → Switch mode safely
 - `GET /trades` → Trade ledger
 - `GET /health` → Health + auth status (in LIVE)
-- `GET /auth/login` → Start OAuth login (redirect to Fyers)
-- `GET /auth/callback` → Exchange auth code and save token to `.env`
-- `GET /auth/status` → Check OAuth configuration/token validity
 
 ### Mode switch payload example
 
