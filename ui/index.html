@@ -6,8 +6,8 @@
   <title>Dual Mode Trading Console</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
-    .wrap { max-width: 1100px; margin: 20px auto; padding: 16px; }
-    .row { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+    .wrap { max-width: 1200px; margin: 20px auto; padding: 16px; }
+    .row { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; }
     .card { background: #1e293b; border-radius: 10px; padding: 12px; }
     .mode-paper { background: #ca8a04; color: #111827; font-weight: 700; padding: 6px 10px; border-radius: 8px; }
     .mode-live { background: #b91c1c; color: #fff; font-weight: 700; padding: 6px 10px; border-radius: 8px; }
@@ -15,8 +15,12 @@
     .ok { background: #16a34a; color: white; }
     .no { background: #dc2626; color: white; }
     .warn { background: #d97706; color: white; }
+    .danger { background: #7f1d1d; color: white; }
     table { width: 100%; border-collapse: collapse; }
     td, th { border-bottom: 1px solid #334155; text-align: left; padding: 8px; font-size: 13px; }
+    .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); }
+    .modal { background:#1e293b; width:420px; max-width:90%; margin:12% auto; padding:16px; border-radius:10px; }
+    .small { opacity:.8; font-size:12px; }
   </style>
 </head>
 <body>
@@ -27,23 +31,36 @@
     <button class="warn" id="toggleMode">Switch Mode</button>
     <button class="ok" id="approveBtn">Approve</button>
     <button class="no" id="rejectBtn">Reject</button>
+    <button class="danger" id="stopBtn">Emergency STOP</button>
+    <span class="small" id="authStatus" style="margin-left:8px;">Auth: -</span>
   </div>
 
   <div class="row" style="margin-top: 12px;">
     <div class="card"><b>Bot Status:</b> <span id="botStatus">-</span></div>
     <div class="card"><b>Current Position:</b> <span id="position">-</span></div>
     <div class="card"><b>Today's PnL:</b> ₹<span id="pnl">0</span></div>
+    <div class="card"><b>Drawdown:</b> ₹<span id="drawdown">0</span></div>
     <div class="card"><b>Pending Signal:</b> <span id="pending">-</span></div>
     <div class="card"><b>Approval Countdown:</b> <span id="countdown">0</span>s</div>
     <div class="card"><b>Win Rate:</b> <span id="winrate">0</span>%</div>
+    <div class="card"><b>Trade Limits:</b> <span id="limits">0/3 trades, 0/2 losses</span></div>
   </div>
 
   <div class="card" style="margin-top: 12px;">
     <h3>Trade History</h3>
     <table>
-      <thead><tr><th>Time</th><th>Mode</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th></tr></thead>
+      <thead><tr><th>Time</th><th>Mode</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th></tr></thead>
       <tbody id="tradesBody"></tbody>
     </table>
+  </div>
+</div>
+
+<div id="liveModal" class="modal-backdrop">
+  <div class="modal">
+    <h3>Confirm LIVE Mode</h3>
+    <p>LIVE mode places real orders with real capital. Continue?</p>
+    <button class="warn" id="liveConfirm">Yes, switch to LIVE</button>
+    <button class="no" id="liveCancel">Cancel</button>
   </div>
 </div>
 
@@ -62,38 +79,54 @@ function setMode(mode){
 }
 
 async function refresh(){
-  const st = await api('/status');
+  const [st, health, trades] = await Promise.all([api('/status'), api('/health'), api('/trades')]);
   setMode(st.mode);
   document.getElementById('botStatus').textContent = st.bot_status;
   document.getElementById('position').textContent = st.position ? `${st.position.side} ${st.position.qty} @ ${st.position.entry_price}` : 'NONE';
   document.getElementById('pnl').textContent = Number(st.today_pnl).toFixed(2);
-  document.getElementById('pending').textContent = st.pending_signal ? `${st.pending_signal.side} ${st.pending_signal.qty}` : 'NONE';
+  document.getElementById('drawdown').textContent = Number(st.drawdown).toFixed(2);
+  document.getElementById('pending').textContent = st.pending_signal ? `${st.pending_signal.side} ${st.pending_signal.qty} (id: ${st.pending_correlation_id || '-'})` : 'NONE';
   document.getElementById('countdown').textContent = st.approval_countdown;
   document.getElementById('winrate').textContent = Number(st.win_rate).toFixed(2);
+  document.getElementById('limits').textContent = `${st.trades_today}/3 trades, ${st.losses_today}/2 losses`;
+  document.getElementById('authStatus').textContent = `Auth: ${health.fyers_auth_valid ? 'Valid' : 'Invalid'}`;
 
   document.getElementById('toggleMode').disabled = !!st.position;
+  document.getElementById('approveBtn').disabled = !st.pending_signal;
+  document.getElementById('rejectBtn').disabled = !st.pending_signal;
 
-  const trades = await api('/trades');
   const body = document.getElementById('tradesBody');
   body.innerHTML = '';
   trades.trades.slice().reverse().forEach(t => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${t.exit_time || t.entry_time}</td><td>${t.mode}</td><td>${t.side}</td><td>${t.entry}</td><td>${t.exit}</td><td>${Number(t.pnl).toFixed(2)}</td><td>${t.reason}</td>`;
+    tr.innerHTML = `<td>${t.exit_time || t.entry_time || '-'}</td><td>${t.mode || '-'}</td><td>${t.side || '-'}</td><td>${t.qty || '-'}</td><td>${t.entry || '-'}</td><td>${t.exit || '-'}</td><td>${Number(t.pnl || 0).toFixed(2)}</td><td>${t.reason || '-'}</td>`;
     body.appendChild(tr);
   });
 }
 
 document.getElementById('approveBtn').onclick = async ()=>{ try { await api('/approve', 'POST'); await refresh(); } catch(e){ alert(e.message);} };
 document.getElementById('rejectBtn').onclick = async ()=>{ try { await api('/reject', 'POST'); await refresh(); } catch(e){ alert(e.message);} };
+document.getElementById('stopBtn').onclick = async ()=>{ try { await api('/stop','POST'); await refresh(); alert('Engine stopped. Restart run.py to resume.'); } catch(e){ alert(e.message);} };
 
 document.getElementById('toggleMode').onclick = async ()=>{
   try {
     const current = (await api('/mode')).mode;
     const target = current === 'PAPER' ? 'LIVE' : 'PAPER';
+    if(target === 'LIVE'){
+      document.getElementById('liveModal').style.display = 'block';
+      document.getElementById('liveConfirm').onclick = async ()=>{
+        try {
+          await api('/mode/switch','POST',{mode: 'LIVE', confirm_live: true});
+          document.getElementById('liveModal').style.display = 'none';
+          await refresh();
+        } catch(e){ alert(e.message); }
+      };
+      document.getElementById('liveCancel').onclick = ()=>{ document.getElementById('liveModal').style.display = 'none'; };
+      return;
+    }
     const ok = confirm(`Switch mode from ${current} to ${target}?`);
     if(!ok) return;
-    const confirm_live = target === 'LIVE' ? confirm('FINAL CONFIRM: LIVE mode places real orders. Continue?') : false;
-    await api('/mode/switch','POST',{mode: target, confirm_live});
+    await api('/mode/switch','POST',{mode: target, confirm_live: false});
     await refresh();
   } catch(e){ alert(e.message); }
 };

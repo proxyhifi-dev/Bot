@@ -1,240 +1,203 @@
-# Dual-Mode NIFTY Trading System (PAPER + LIVE)
+# Dual-Mode NIFTY Supertrend Trading Bot
 
-Production-ready algorithmic trading system with **safe one-button mode switching** between:
-
-- **PAPER mode** (simulated execution at real LTP)
-- **LIVE mode** (real broker order execution via Fyers)
+Production-ready Python trading bot with **PAPER/LIVE dual execution**, **manual approval workflow**, **official Fyers OAuth login**, and **risk controls**.
 
 ---
 
-## Features
+## Project Overview
 
-- Single global trading mode: `PAPER` / `LIVE`
-- One-button mode switch in Web UI with confirmations
-- Mode switch blocked if position is open
-- LIVE switch requires explicit confirmation + auth validation
-- Supertrend strategy on NIFTY 5-minute data (`Supertrend(10,3)`)
-- Approval workflow (`Approve` / `Reject`) before order entry
-- Risk controls:
-  - 1% risk per trade
-  - max 3 trades/day
-  - stop after 2 losses
-  - no new entries after 2:45 PM
-  - force square-off at 3:15 PM
-- Trade, signal, approval, execution, exit, pnl, mode-change logging
-- Backtest using historical Fyers data with performance metrics
+This bot trades **NIFTY 5m candles** using **Supertrend(10,3)** and enforces strict safety:
+- Manual approval before entries
+- Timed approval auto-rejection (60s)
+- Daily trade/loss limits
+- Session time filters and square-off
+- Concurrency-safe state management across engine + API threads
 
 ---
 
-## Project Structure
+## Architecture Diagram (Text)
 
-```
-api/main.py                 FastAPI app + required endpoints
-engine/mode.py              TradingMode enum + mode-switch guardrails
-engine/trading_engine.py    Main orchestration (signals/risk/execution)
-engine/execution.py         Paper + Live execution router
-execution/fyers_adapter.py  Fyers OAuth + market/order APIs
-engine/risk.py              Risk/time window controls
-engine/portfolio.py         Position state, PnL, drawdown, win-rate
-strategies/supertrend.py    Supertrend(10,3) signal generation
-ui/index.html               Dashboard with one-button mode toggle
-backtest.py                 Independent backtest runner
-.env.example                Environment template
+```text
+run.py
+  └─ loads .env, validates/authenticates Fyers token (interactive if needed)
+  └─ starts FastAPI (api/main.py)
+       ├─ TradingEngine (engine/trading_engine.py)
+       │    ├─ ModeManager (PAPER/LIVE)
+       │    ├─ RiskManager (1% risk, max trades/losses, time filters)
+       │    ├─ Portfolio (open position + trade ledger + pnl)
+       │    ├─ SupertrendStrategy(10,3)
+       │    ├─ TradeExecutor (paper/live router)
+       │    ├─ Approval timeout daemon (60s)
+       │    └─ Market evaluation loop (background)
+       ├─ FyersAdapter (execution/fyers_adapter.py)
+       │    ├─ OAuth login URL + code exchange + token persistence
+       │    ├─ token validation (/api/v3/profile)
+       │    └─ resilient API calls with exponential backoff
+       └─ UI served from ui/index.html
 ```
 
 ---
 
-## Prerequisites
+## Features Implemented
 
-- Python 3.10+
-- Fyers app credentials (for LIVE mode)
-- Network connectivity to Fyers APIs
+- PAPER and LIVE modes
+- Safe mode switching guardrails
+- LIVE blocked if auth invalid
+- Supertrend(10,3) only
+- NIFTY 5m only
+- Approval API + UI actions
+- 60-second background approval timeout
+- Concurrency locks on mutable shared state
+- Rate-limit and network retry backoff
+- JSON structured logging to `logs/trades.log`
+- Backtest with Fyers historical candles
 
 ---
 
-## Setup
+## OAuth Setup Guide (Official Manual Flow)
 
-1. **Clone and enter repo**
+1. Configure `.env` using `.env.example`.
+2. Run:
+   ```bash
+   python run.py
+   ```
+3. On first run, bot prints Fyers login URL.
+4. Open URL in browser and login manually.
+5. Copy redirected callback URL (or auth code) and paste into terminal prompt.
+6. Bot exchanges code for token and saves token to `FYERS_TOKEN_FILE`.
+7. Future runs auto-load token and validate via `/api/v3/profile`.
+8. If invalid/expired, manual login is requested again.
 
-```bash
-git clone <repo_url>
-cd Bot
-```
+> No username/password/PIN/TOTP is automated by code.
 
-2. **Create virtual environment**
+---
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-3. **Install dependencies**
+## How to Run Bot
 
 ```bash
 pip install -r requirements.txt
-```
-
-4. **Configure environment**
-
-```bash
 cp .env.example .env
+# fill credentials
+python run.py
 ```
 
-Then set values in `.env`:
-
-- `FYERS_CLIENT_ID`
-- `FYERS_SECRET_KEY`
-- `FYERS_REDIRECT_URI`
-- `FYERS_ACCESS_TOKEN` (or fetch via OAuth flow)
-- `FYERS_BASE_URL` (default provided)
-- `TRADING_SYMBOL` (default NIFTY index)
-- `CAPITAL`
-
----
-
-## Run the API + UI
-
-```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
-
-Open UI:
-
+UI:
 - `http://127.0.0.1:8000/`
 
 ---
 
-## How Mode Switching Works
+## Mode Switching Guide
 
-### PAPER → LIVE
-
-Allowed only if all are true:
-
-- No open position
-- `confirm_live=true`
-- Fyers auth token is valid
-
-When LIVE is activated, system writes an elevated risk warning in logs.
-
-### LIVE → PAPER
-
-- Immediate switch allowed only if no open position.
-
-### Block conditions
-
-- If open position exists, mode switch is rejected.
+- Use UI “Switch Mode” button.
+- PAPER → LIVE requires explicit confirmation modal.
+- Mode switch is blocked if an open position exists.
+- LIVE requires valid Fyers authentication.
 
 ---
 
-## UI Usage
+## Approval Workflow
 
-Dashboard supports:
-
-- Current mode badge (`PAPER MODE` warning style / `LIVE MODE` alert style)
-- One-button mode toggle with confirmation dialogs
-- Bot status
-- Current position
-- Today PnL
-- Pending signal
-- Approval countdown
-- Trade history
-- Approve / Reject buttons
-- Auto-refresh every 3 seconds
+1. Engine generates pending signal.
+2. UI/API shows pending signal and countdown.
+3. User can:
+   - `POST /approve`
+   - `POST /reject`
+4. If pending > 60 seconds, background timeout thread auto-rejects.
 
 ---
 
-## API Endpoints
+## Risk Rules Explanation
 
-- `GET /signal` → Evaluate market and create pending signal if conditions pass
-- `POST /approve` → Approve pending signal and execute entry
-- `POST /reject` → Reject pending signal
-- `GET /status` → Runtime status snapshot
-- `GET /pnl` → PnL summary
-- `GET /mode` → Current trading mode
-- `POST /mode/switch` → Switch mode safely
-- `GET /trades` → Trade ledger
-- `GET /health` → Health + auth status (in LIVE)
+- Strategy: Supertrend(10,3)
+- Symbol: `NSE:NIFTY50-INDEX`
+- Timeframe: 5 minutes
+- Risk per trade: 1% of capital
+- Max trades/day: 3
+- Stop after 2 losses/day
+- No new trades after 14:45
+- Force square-off at 15:15
 
-### Mode switch payload example
+---
 
+## API Documentation
+
+- `GET /signal` – evaluate market and possibly create pending signal
+- `POST /approve` – approve pending signal
+- `POST /reject` – reject pending signal
+- `GET /mode` – current mode
+- `POST /mode/switch` – switch mode
+- `GET /status` – bot state
+- `GET /pnl` – pnl summary
+- `GET /trades` – executed trade ledger
+- `GET /health` – health + auth status
+- `POST /stop` – emergency stop engine
+
+Mode switch payload:
 ```json
-{
-  "mode": "LIVE",
-  "confirm_live": true
-}
+{ "mode": "LIVE", "confirm_live": true }
 ```
 
 ---
 
-## Paper vs Live Execution
+## UI Usage Steps
 
-### PAPER
-
-- Uses **real market LTP**
-- Simulates fills at LTP
-- Applies same strategy/risk/time constraints
-- Tracks entry/exit/PnL/drawdown/win-rate
-- Trades/logs marked as PAPER
-
-### LIVE
-
-- Real order placement via Fyers
-- Token validation required
-- Retry handling for transient/rate-limit errors
-- Duplicate order guard
-- Position sync support
+- Observe mode badge and auth status.
+- Review pending signal + countdown.
+- Approve/reject signals.
+- Review trade history and pnl cards.
+- Use Emergency STOP to halt engine loop.
 
 ---
 
-## Backtest
-
-Run:
+## Backtest Instructions
 
 ```bash
 python backtest.py
 ```
 
 Outputs:
-
-- Total Trades
-- Win Rate
+- Total trades
+- Win rate
 - Net PnL
 - Max Drawdown
 - Profit Factor
 
-Backtest is independent of runtime mode switch state.
+Backtest uses real Fyers historical candles (OAuth required).
 
 ---
 
-## Operational Safety Checklist (Before LIVE)
+## Troubleshooting
 
-1. Run in PAPER mode for multiple sessions.
-2. Verify signals, approvals, SL/Target exits, and PnL accounting.
-3. Verify mode switch blocks while position is open.
-4. Validate Fyers token and profile API.
-5. Confirm no duplicate order behavior under retries.
-6. Keep monitoring logs during first LIVE activation.
-
----
-
-## Testing
-
-Run unit tests:
-
-```bash
-python -m pytest -q
-```
-
-Compile check:
-
-```bash
-python -m compileall api engine execution strategies backtest.py
-```
+- **Missing env keys**: ensure `FYERS_CLIENT_ID`, `FYERS_SECRET_KEY`, `FYERS_REDIRECT_URI`.
+- **Auth fails**: verify redirect URI matches Fyers app config.
+- **429 rate limits**: handled automatically with exponential backoff.
+- **LIVE blocked**: validate token (`GET /health`) and ensure no open position.
+- **No signals**: strategy may naturally return no signal for current candles.
 
 ---
 
-## Notes
+## Known Limitations
 
-- This system routes execution strictly by global mode.
-- Never enable LIVE without valid broker auth and dry-run validation in PAPER.
-- Market/API/network failures should be monitored with proper alerting in production deployment.
+- No websocket streaming; polling-based evaluation loop.
+- No broker-side open-position reconciliation beyond startup check.
+- No advanced portfolio multi-symbol support.
+
+---
+
+## Pending Improvements
+
+- Add websocket market data integration.
+- Add persistent database trade journal.
+- Add alerting hooks (Slack/Email/PagerDuty).
+- Add richer analytics dashboard.
+
+---
+
+## Production Deployment Guide
+
+1. Use Linux host with systemd or container supervisor.
+2. Mount `.env` and token file securely.
+3. Rotate logs and monitor `logs/trades.log`.
+4. Restrict network ingress to trusted operator IPs.
+5. Run with reverse proxy (TLS) for UI/API.
+6. Maintain periodic backup of token file and logs.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -11,15 +12,16 @@ import requests
 
 
 class FyersAdapter:
-    """Official-Fyers style adapter with OAuth/token validation, retries and rate-limit handling."""
+    """Fyers adapter with interactive OAuth, token persistence and resilient HTTP handling."""
 
     def __init__(self):
         self.logger = logging.getLogger("fyers_adapter")
-        self.client_id = os.getenv("FYERS_CLIENT_ID", "")
-        self.secret_key = os.getenv("FYERS_SECRET_KEY", "")
-        self.redirect_uri = os.getenv("FYERS_REDIRECT_URI", "")
-        self.access_token = os.getenv("FYERS_ACCESS_TOKEN", "")
-        self.base_url = os.getenv("FYERS_BASE_URL", "https://api-t1.fyers.in")
+        self.client_id = os.getenv("FYERS_CLIENT_ID", "").strip()
+        self.secret_key = os.getenv("FYERS_SECRET_KEY", "").strip()
+        self.redirect_uri = os.getenv("FYERS_REDIRECT_URI", "").strip()
+        self.base_url = os.getenv("FYERS_BASE_URL", "https://api-t1.fyers.in").strip()
+        token_path = os.getenv("FYERS_TOKEN_FILE", ".secrets/fyers_token.json")
+        self.token_file = Path(token_path)
 
         self.session = requests.Session()
 
@@ -84,23 +86,57 @@ class FyersAdapter:
         raise RuntimeError(f"Unhandled request failure for {method} {path}")
 
     def get_login_url(self, state: str = "bot") -> str:
+        self._validate_env()
         return (
             "https://api-t1.fyers.in/api/v3/generate-authcode"
             f"?client_id={self.client_id}&redirect_uri={self.redirect_uri}&response_type=code&state={state}"
         )
 
-    def exchange_auth_code(self, auth_code: str) -> Dict:
+    def exchange_auth_code(self, auth_code: str) -> Dict[str, Any]:
+        self._validate_env()
         payload = {
             "grant_type": "authorization_code",
-            "appIdHash": self.client_id,
+            "appIdHash": self._app_id_hash(),
             "code": auth_code,
         }
         resp = self._request_with_backoff("POST", "/api/v3/token", json=payload)
         data = resp.json()
         token = data.get("access_token")
-        if token:
-            self.access_token = token
+        if not token:
+            raise RuntimeError(f"OAuth exchange failed: {data}")
+        self.access_token = str(token)
+        self._save_token(self.access_token)
+        self._log_event("auth_token_exchanged", {"status": "success"})
         return data
+
+    def authenticate_interactive(self) -> bool:
+        with self._auth_lock:
+            if self.validate_token():
+                return True
+
+            login_url = self.get_login_url(state="manual_login")
+            print("\n=== FYERS MANUAL LOGIN REQUIRED ===")
+            print("1) Open this URL in your browser and login manually:")
+            print(login_url)
+            print("2) After login, copy the full redirected URL or auth code and paste below.")
+            redirected = input("Auth callback URL / auth code: ").strip()
+            if not redirected:
+                raise RuntimeError("No auth code provided")
+
+            auth_code = self._extract_auth_code(redirected)
+            self.exchange_auth_code(auth_code)
+            ok = self.validate_token()
+            self._log_event("auth_manual_completed", {"valid": ok})
+            if not ok:
+                raise RuntimeError("Token validation failed after OAuth login")
+            return True
+
+    def ensure_authenticated(self, interactive: bool = False) -> bool:
+        if self.validate_token():
+            return True
+        if interactive:
+            return self.authenticate_interactive()
+        return False
 
     def validate_token(self) -> bool:
         if not self.access_token or not self.client_id:
@@ -112,7 +148,7 @@ class FyersAdapter:
             self.logger.warning("Token validation failed status=%s body=%s", resp.status_code, resp.text)
             return False
         except requests.RequestException as exc:
-            self.logger.error("Token validation error: %s", exc)
+            self._log_event("auth_token_invalid", {"error": str(exc)}, level=logging.WARNING)
             return False
 
     def get_ltp(self, symbol: str) -> float:
@@ -143,7 +179,7 @@ class FyersAdapter:
         data = resp.json()
         return data.get("candles", [])
 
-    def place_order(self, order: Dict) -> Dict:
+    def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
         dedupe_key = f"{order.get('symbol')}|{order.get('side')}|{order.get('qty')}|{order.get('type')}"
         with self._order_dedupe_lock:
             if dedupe_key in self._order_dedupe:

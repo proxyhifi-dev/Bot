@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import logging
 import threading
 import time
@@ -31,7 +32,7 @@ class TradingEngine:
         self.strategy = SupertrendStrategy(period=10, multiplier=3)
         self.executor = TradeExecutor(self.mode_manager, self.portfolio, self.fyers)
 
-        self.pending_signal: Optional[Dict] = None
+        self.pending_signal: Optional[Dict[str, Any]] = None
         self.pending_expiry: Optional[datetime] = None
         self.pending_correlation_id: Optional[str] = None
         self.last_signal: Optional[str] = None
@@ -77,16 +78,19 @@ class TradingEngine:
             return
         positions = self.fyers.get_positions()
         if positions:
-            self.logger.warning("Broker has open positions at startup: %s", positions)
+            self._log_event("live_positions_detected", details={"positions": positions})
 
-    def evaluate_market(self) -> Dict:
+    def evaluate_market(self) -> Dict[str, Any]:
         candles = self.data.latest_5m_candles()
+        if not candles:
+            return {"event": "no_candles"}
         ltp = float(candles[-1][4])
         now = datetime.now()
 
         if self.risk.should_force_square_off(now) and self.portfolio.has_open_position():
             result = self.executor.exit_trade(ltp, "Force square-off 3:15 PM")
             self.risk.register_trade(result.get("pnl", 0.0))
+            self._log_event("force_square_off", details={"result": result})
             return {"event": "force_square_off", "result": result}
 
         open_position = self.portfolio.get_open_position()
@@ -98,6 +102,7 @@ class TradingEngine:
                 reason = "SL hit" if (ltp <= p.stop_loss if p.side == "BUY" else ltp >= p.stop_loss) else "Target hit"
                 result = self.executor.exit_trade(ltp, reason)
                 self.risk.register_trade(result.get("pnl", 0.0))
+                self._log_event("position_exit", details={"reason": reason, "result": result})
                 return {"event": "position_exit", "result": result}
             return {"event": "position_holding", "ltp": ltp}
 
@@ -186,18 +191,15 @@ class TradingEngine:
         )
         return {"status": "rejected", "correlation_id": corr_id}
 
-    def switch_mode(self, target_mode: TradingMode, confirm_live: bool) -> Dict:
+    def switch_mode(self, target_mode: TradingMode, confirm_live: bool) -> Dict[str, Any]:
         event = self.mode_manager.switch_mode(
             target_mode=target_mode,
             has_open_position=self.portfolio.has_open_position(),
             confirm_live=confirm_live,
             auth_validator=self.fyers.validate_token,
         )
-        return {
-            "from": event.from_mode.value,
-            "to": event.to_mode.value,
-            "reason": event.reason,
-        }
+        self._log_event("mode_switched", details={"from": event.from_mode.value, "to": event.to_mode.value})
+        return {"from": event.from_mode.value, "to": event.to_mode.value, "reason": event.reason}
 
     def approval_countdown(self) -> int:
         with self._state_lock:
@@ -206,7 +208,7 @@ class TradingEngine:
             return 0
         return max(int((pending_expiry - datetime.now()).total_seconds()), 0)
 
-    def status(self) -> Dict:
+    def status(self) -> Dict[str, Any]:
         stats = self.portfolio.stats()
         with self._state_lock:
             pending_signal = self.pending_signal
@@ -214,7 +216,7 @@ class TradingEngine:
             corr_id = self.pending_correlation_id
         return {
             "mode": self.mode_manager.mode.value,
-            "bot_status": "RUNNING",
+            "bot_status": "RUNNING" if self._running and not self._stop_event.is_set() else "STOPPED",
             "position": stats["open_position"],
             "today_pnl": stats["realized_pnl"],
             "pending_signal": pending_signal,
