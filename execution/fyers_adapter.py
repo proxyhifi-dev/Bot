@@ -4,9 +4,11 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import threading
 import time
-from typing import Dict, List
+from typing import Any, Dict, List
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -22,6 +24,11 @@ class FyersAdapter:
         self.base_url = os.getenv("FYERS_BASE_URL", "https://api-t1.fyers.in").strip()
         token_path = os.getenv("FYERS_TOKEN_FILE", ".secrets/fyers_token.json")
         self.token_file = Path(token_path)
+        self.access_token = ""
+        self._auth_lock = threading.Lock()
+        self._auth_fail_lock = threading.Lock()
+        self._last_auth_failure_ts = 0.0
+        self._auth_failure_cooldown_seconds = int(os.getenv("FYERS_AUTH_FAILURE_COOLDOWN_SECONDS", "30"))
 
         self.session = requests.Session()
 
@@ -29,6 +36,7 @@ class FyersAdapter:
         self._order_dedupe_lock = threading.Lock()
         self._max_retries = 5
         self._base_backoff = 0.5
+        self._load_token()
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -42,18 +50,19 @@ class FyersAdapter:
         for attempt in range(self._max_retries + 1):
             try:
                 resp = self.session.request(method=method, url=url, timeout=10, **kwargs)
-                if resp.status_code == 429:
+                if resp.status_code in (429, 500, 502, 503, 504):
                     if attempt >= self._max_retries:
                         self.logger.error(
-                            "rate_limit_exhausted method=%s path=%s attempts=%s",
+                            "retry_exhausted method=%s path=%s status=%s attempts=%s",
                             method,
                             path,
+                            resp.status_code,
                             attempt + 1,
                         )
                         resp.raise_for_status()
                     backoff = self._base_backoff * (2**attempt)
                     self.logger.warning(
-                        "rate_limit method=%s path=%s status=%s attempt=%s backoff_s=%.2f",
+                        "retryable_status method=%s path=%s status=%s attempt=%s backoff_s=%.2f",
                         method,
                         path,
                         resp.status_code,
@@ -62,12 +71,16 @@ class FyersAdapter:
                     )
                     time.sleep(backoff)
                     continue
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    resp.raise_for_status()
                 return resp
             except requests.RequestException as exc:
                 last_exc = exc
-                if getattr(getattr(exc, "response", None), "status_code", None) == 429:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status in (429, 500, 502, 503, 504):
                     continue
+                if status is not None and 400 <= status < 500:
+                    break
                 if attempt >= self._max_retries:
                     break
                 backoff = self._base_backoff * (2**attempt)
@@ -94,6 +107,8 @@ class FyersAdapter:
 
     def exchange_auth_code(self, auth_code: str) -> Dict[str, Any]:
         self._validate_env()
+        if not auth_code:
+            raise ValueError("Auth code cannot be empty")
         payload = {
             "grant_type": "authorization_code",
             "appIdHash": self._app_id_hash(),
@@ -113,6 +128,9 @@ class FyersAdapter:
         with self._auth_lock:
             if self.validate_token():
                 return True
+            if not self._can_attempt_authentication():
+                remaining = int(self._auth_failure_cooldown_seconds - (time.time() - self._last_auth_failure_ts))
+                raise RuntimeError(f"Authentication cooldown active. Retry in ~{max(remaining, 1)}s")
 
             login_url = self.get_login_url(state="manual_login")
             print("\n=== FYERS MANUAL LOGIN REQUIRED ===")
@@ -124,12 +142,17 @@ class FyersAdapter:
                 raise RuntimeError("No auth code provided")
 
             auth_code = self._extract_auth_code(redirected)
-            self.exchange_auth_code(auth_code)
-            ok = self.validate_token()
-            self._log_event("auth_manual_completed", {"valid": ok})
-            if not ok:
-                raise RuntimeError("Token validation failed after OAuth login")
-            return True
+            try:
+                self.exchange_auth_code(auth_code)
+                ok = self.validate_token()
+                self._log_event("auth_manual_completed", {"valid": ok})
+                if not ok:
+                    self._mark_auth_failure()
+                    raise RuntimeError("Token validation failed after OAuth login")
+                return True
+            except Exception:
+                self._mark_auth_failure()
+                raise
 
     def ensure_authenticated(self, interactive: bool = False) -> bool:
         if self.validate_token():
@@ -152,6 +175,8 @@ class FyersAdapter:
             return False
 
     def get_ltp(self, symbol: str) -> float:
+        if not symbol:
+            raise ValueError("Symbol is required")
         payload = {"symbols": symbol}
         resp = self._request_with_backoff("GET", "/data/quotes", params=payload, headers=self._headers())
         data = resp.json()
@@ -180,6 +205,7 @@ class FyersAdapter:
         return data.get("candles", [])
 
     def place_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        self._validate_order(order)
         dedupe_key = f"{order.get('symbol')}|{order.get('side')}|{order.get('qty')}|{order.get('type')}"
         with self._order_dedupe_lock:
             if dedupe_key in self._order_dedupe:
@@ -197,3 +223,78 @@ class FyersAdapter:
     def get_positions(self) -> List[Dict]:
         resp = self._request_with_backoff("GET", "/api/v3/positions", headers=self._headers())
         return resp.json().get("netPositions", [])
+
+    def _validate_env(self) -> None:
+        required = {
+            "FYERS_CLIENT_ID": self.client_id,
+            "FYERS_SECRET_KEY": self.secret_key,
+            "FYERS_REDIRECT_URI": self.redirect_uri,
+        }
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
+    def _validate_order(self, order: Dict[str, Any]) -> None:
+        symbol = str(order.get("symbol", "")).strip()
+        qty = order.get("qty")
+        product_type = order.get("productType")
+        side = order.get("side")
+        order_type = order.get("type")
+
+        if not symbol:
+            raise ValueError("Order validation failed: symbol is required")
+        if not isinstance(qty, int) or qty <= 0:
+            raise ValueError("Order validation failed: qty must be a positive integer")
+        if product_type != "INTRADAY":
+            raise ValueError("Order validation failed: productType must be INTRADAY")
+        if side not in (1, -1):
+            raise ValueError("Order validation failed: side must be 1 or -1")
+        if order_type not in (1, 2, 3, 4):
+            raise ValueError("Order validation failed: unsupported type")
+
+    def _app_id_hash(self) -> str:
+        raw = f"{self.client_id}:{self.secret_key}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _save_token(self, token: str) -> None:
+        self.token_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"access_token": token, "saved_at": int(time.time())}
+        self.token_file.write_text(json.dumps(payload), encoding="utf-8")
+        os.chmod(self.token_file, 0o600)
+
+    def _load_token(self) -> None:
+        if not self.token_file.exists():
+            return
+        try:
+            data = json.loads(self.token_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.warning("token_file_read_failed path=%s error=%s", self.token_file, exc)
+            return
+        token = str(data.get("access_token", "")).strip()
+        if token:
+            self.access_token = token
+
+    @staticmethod
+    def _extract_auth_code(redirected_or_code: str) -> str:
+        value = redirected_or_code.strip()
+        if value.startswith("http://") or value.startswith("https://"):
+            parsed = urlparse(value)
+            code = parse_qs(parsed.query).get("code", [""])[0]
+            if not code:
+                raise ValueError("No auth code in callback URL")
+            return code
+        return value
+
+    def _log_event(self, event: str, details: Dict[str, Any], level: int = logging.INFO) -> None:
+        redacted = dict(details)
+        if "access_token" in redacted:
+            redacted["access_token"] = "***"
+        self.logger.log(level, "event=%s details=%s", event, redacted)
+
+    def _can_attempt_authentication(self) -> bool:
+        with self._auth_fail_lock:
+            return (time.time() - self._last_auth_failure_ts) >= self._auth_failure_cooldown_seconds
+
+    def _mark_auth_failure(self) -> None:
+        with self._auth_fail_lock:
+            self._last_auth_failure_ts = time.time()
