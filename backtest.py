@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
+from datetime import datetime, timedelta
+from typing import List, Optional
 
 from execution.fyers_adapter import FyersAdapter
 from strategies.supertrend import SupertrendStrategy
@@ -17,18 +18,31 @@ class BacktestResult:
 
 
 class SupertrendBacktester:
-    def __init__(self, symbol: str = "NSE:NIFTY50-INDEX"):
+    def __init__(self, symbol: str = "NSE:NIFTY50-INDEX", resolution: str = "5"):
         self.symbol = symbol
+        self.resolution = resolution
         self.fyers = FyersAdapter()
         self.strategy = SupertrendStrategy(10, 3)
 
-    def run(self) -> BacktestResult:
-        candles = self.fyers.get_history(self.symbol)
-        if len(candles) < 50:
-            raise RuntimeError("Insufficient historical data from Fyers")
+    def _fetch_data(self, days: int = 60) -> List[List[float]]:
+        self.fyers.ensure_authenticated(interactive=True)
+        end = int(datetime.now().timestamp())
+        start = int((datetime.now() - timedelta(days=days)).timestamp())
+        candles = self.fyers.get_history(
+            symbol=self.symbol,
+            resolution=self.resolution,
+            range_from=str(start),
+            range_to=str(end),
+        )
+        if len(candles) < 100:
+            raise RuntimeError("Insufficient historical data from Fyers for backtest")
+        return candles
 
-        in_pos = False
-        entry = 0.0
+    def run(self) -> BacktestResult:
+        candles = self._fetch_data()
+
+        position: Optional[str] = None
+        entry_price = 0.0
         pnl_list: List[float] = []
         equity = 0.0
         peak = 0.0
@@ -36,18 +50,28 @@ class SupertrendBacktester:
 
         for i in range(20, len(candles)):
             chunk = candles[: i + 1]
-            sig = self.strategy.generate_signal(chunk)
-            ltp = chunk[-1][4]
-            if not in_pos and sig == "BUY":
-                in_pos = True
-                entry = ltp
-            elif in_pos and sig == "SELL":
-                pnl = ltp - entry
+            signal = self.strategy.generate_signal(chunk)
+            ltp = float(chunk[-1][4])
+
+            if position is None and signal in {"BUY", "SELL"}:
+                position = signal
+                entry_price = ltp
+                continue
+
+            if position == "BUY" and signal == "SELL":
+                pnl = ltp - entry_price
                 pnl_list.append(pnl)
-                equity += pnl
-                peak = max(peak, equity)
-                max_dd = max(max_dd, peak - equity)
-                in_pos = False
+                position = None
+            elif position == "SELL" and signal == "BUY":
+                pnl = entry_price - ltp
+                pnl_list.append(pnl)
+                position = None
+            else:
+                continue
+
+            equity += pnl_list[-1]
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
 
         wins = [p for p in pnl_list if p > 0]
         losses = [abs(p) for p in pnl_list if p < 0]
@@ -64,10 +88,10 @@ class SupertrendBacktester:
 
 
 if __name__ == "__main__":
-    r = SupertrendBacktester().run()
+    result = SupertrendBacktester().run()
     print("Backtest complete")
-    print(f"Total Trades: {r.total_trades}")
-    print(f"Win Rate: {r.win_rate:.2f}%")
-    print(f"Net PnL: {r.net_pnl:.2f}")
-    print(f"Max Drawdown: {r.max_drawdown:.2f}")
-    print(f"Profit Factor: {r.profit_factor:.2f}")
+    print(f"Total Trades: {result.total_trades}")
+    print(f"Win Rate: {result.win_rate:.2f}%")
+    print(f"Net PnL: {result.net_pnl:.2f}")
+    print(f"Max Drawdown: {result.max_drawdown:.2f}")
+    print(f"Profit Factor: {result.profit_factor:.2f}")

@@ -1,19 +1,30 @@
+from __future__ import annotations
+
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
-from engine.trading_engine import TradingEngine
-from engine.live_data import LiveMarketData
+import uvicorn
 
-load_dotenv()
+from api.main import configure_logging
+from execution.fyers_adapter import FyersAdapter
 
-access_token = os.getenv("FYERS_ACCESS_TOKEN")
 
-if not access_token:
-    print("❌ No access token found in .env")
-    exit()
+def main() -> None:
+    load_dotenv()
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    Path(".secrets").mkdir(parents=True, exist_ok=True)
+    configure_logging()
 
-print("\n🚀 Starting LIVE NIFTY Paper Trading Bot...\n")
+    fyers = FyersAdapter()
+    fyers.ensure_authenticated(interactive=True)
 
-engine = TradingEngine()
-live_data = LiveMarketData(access_token, engine)
+    host = os.getenv("APP_HOST", "0.0.0.0")
+    port = int(os.getenv("APP_PORT", "8000"))
 
-live_data.start()
+    print(f"\n✅ Fyers authentication is valid. Starting server at http://{host}:{port}\n")
+    uvicorn.run("api.main:app", host=host, port=port, reload=False)
+
+
+if __name__ == "__main__":
+    main()

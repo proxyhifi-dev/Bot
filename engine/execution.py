@@ -67,7 +67,9 @@ class TradeExecutor:
             return {"status": "no_open_position"}
 
         if mode == TradingMode.LIVE:
-            p = self.portfolio.open_position
+            p = self.portfolio.get_open_position()
+            if not p:
+                return {"status": "no_open_position"}
             order = {
                 "symbol": p.symbol,
                 "qty": p.qty,
