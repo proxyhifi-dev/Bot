@@ -76,7 +76,7 @@ def switch_mode(payload: ModeSwitchRequest):
 
 @app.get("/trades")
 def trades():
-    return {"trades": engine.portfolio.trades}
+    return {"trades": engine.portfolio.trades_snapshot()}
 
 
 @app.get("/health")

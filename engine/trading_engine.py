@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import logging
+import threading
+import time
+import uuid
 from typing import Dict, Optional
 
 from engine.execution import TradeExecutor
@@ -14,6 +17,8 @@ from strategies.supertrend import SupertrendStrategy
 
 
 class TradingEngine:
+    APPROVAL_TIMEOUT_SECONDS = 60
+
     def __init__(self, symbol: str = "NSE:NIFTY50-INDEX", capital: float = 100000.0):
         self.logger = logging.getLogger("trading_engine")
         self.symbol = symbol
@@ -28,7 +33,44 @@ class TradingEngine:
 
         self.pending_signal: Optional[Dict] = None
         self.pending_expiry: Optional[datetime] = None
+        self.pending_correlation_id: Optional[str] = None
         self.last_signal: Optional[str] = None
+
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._approval_timeout_thread = threading.Thread(
+            target=self._approval_timeout_loop,
+            name="approval-timeout-engine",
+            daemon=True,
+        )
+        self._approval_timeout_thread.start()
+
+    def _approval_timeout_loop(self) -> None:
+        while not self._stop_event.is_set():
+            timed_out_signal: Optional[Dict] = None
+            timed_out_corr_id: Optional[str] = None
+            now = datetime.now()
+            with self._state_lock:
+                if self.pending_signal and self.pending_expiry and now > self.pending_expiry:
+                    timed_out_signal = self.pending_signal
+                    timed_out_corr_id = self.pending_correlation_id
+                    self.pending_signal = None
+                    self.pending_expiry = None
+                    self.pending_correlation_id = None
+
+            if timed_out_signal:
+                self.logger.info(
+                    "approval=TIMEOUT timestamp=%s correlation_id=%s signal=%s",
+                    now.isoformat(),
+                    timed_out_corr_id,
+                    timed_out_signal,
+                )
+            time.sleep(1)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._approval_timeout_thread.is_alive():
+            self._approval_timeout_thread.join(timeout=2)
 
     def bootstrap_live_positions(self) -> None:
         if self.mode_manager.mode != TradingMode.LIVE:
@@ -47,8 +89,9 @@ class TradingEngine:
             self.risk.register_trade(result.get("pnl", 0.0))
             return {"event": "force_square_off", "result": result}
 
-        if self.portfolio.has_open_position():
-            p = self.portfolio.open_position
+        open_position = self.portfolio.get_open_position()
+        if open_position:
+            p = open_position
             if (p.side == "BUY" and (ltp <= p.stop_loss or ltp >= p.target)) or (
                 p.side == "SELL" and (ltp >= p.stop_loss or ltp <= p.target)
             ):
@@ -63,47 +106,85 @@ class TradingEngine:
             return {"event": "risk_block", "reason": risk_snapshot.reason}
 
         signal = self.strategy.generate_signal(candles)
-        self.last_signal = signal
+        with self._state_lock:
+            self.last_signal = signal
         if signal in {"BUY", "SELL"}:
             qty = self.risk.calculate_position_size(ltp, ltp - 50 if signal == "BUY" else ltp + 50)
             if qty <= 0:
                 return {"event": "invalid_qty"}
-            self.pending_signal = self.strategy.build_trade_signal(self.symbol, signal, ltp, qty)
-            self.pending_expiry = now + timedelta(seconds=30)
+            built_signal = self.strategy.build_trade_signal(self.symbol, signal, ltp, qty)
+            corr_id = str(uuid.uuid4())
+            with self._state_lock:
+                self.pending_signal = built_signal
+                self.pending_expiry = now + timedelta(seconds=self.APPROVAL_TIMEOUT_SECONDS)
+                self.pending_correlation_id = corr_id
+                pending_expiry = self.pending_expiry
             self.logger.info(
-                "mode=%s signal=%s price=%s qty=%s pending_approval_until=%s",
+                "mode=%s signal=%s price=%s qty=%s pending_approval_until=%s correlation_id=%s",
                 self.mode_manager.mode.value,
                 signal,
                 ltp,
                 qty,
-                self.pending_expiry.isoformat(),
+                pending_expiry.isoformat(),
+                corr_id,
             )
-            return {"event": "signal_generated", "signal": self.pending_signal}
+            return {"event": "signal_generated", "signal": built_signal, "correlation_id": corr_id}
 
         return {"event": "no_signal"}
 
     def approve_pending_signal(self) -> Dict:
-        if not self.pending_signal:
+        with self._state_lock:
+            pending_signal = self.pending_signal
+            pending_expiry = self.pending_expiry
+            corr_id = self.pending_correlation_id
+
+        if not pending_signal:
             return {"status": "no_pending_signal"}
-        if self.pending_expiry and datetime.now() > self.pending_expiry:
-            self.pending_signal = None
-            self.pending_expiry = None
-            return {"status": "expired"}
+
+        if pending_expiry and datetime.now() > pending_expiry:
+            with self._state_lock:
+                self.pending_signal = None
+                self.pending_expiry = None
+                self.pending_correlation_id = None
+            self.logger.info(
+                "approval=EXPIRED timestamp=%s correlation_id=%s",
+                datetime.now().isoformat(),
+                corr_id,
+            )
+            return {"status": "expired", "correlation_id": corr_id}
 
         ltp = self.data.latest_ltp()
-        result = self.executor.enter_trade(self.pending_signal, ltp)
-        self.logger.info("mode=%s approval=APPROVED signal=%s", self.mode_manager.mode.value, self.pending_signal)
-        self.pending_signal = None
-        self.pending_expiry = None
+        result = self.executor.enter_trade(pending_signal, ltp)
+        self.logger.info(
+            "mode=%s approval=APPROVED signal=%s correlation_id=%s",
+            self.mode_manager.mode.value,
+            pending_signal,
+            corr_id,
+        )
+        with self._state_lock:
+            self.pending_signal = None
+            self.pending_expiry = None
+            self.pending_correlation_id = None
+        result["correlation_id"] = corr_id
         return result
 
     def reject_pending_signal(self) -> Dict:
-        if not self.pending_signal:
-            return {"status": "no_pending_signal"}
-        self.logger.info("mode=%s approval=REJECTED signal=%s", self.mode_manager.mode.value, self.pending_signal)
-        self.pending_signal = None
-        self.pending_expiry = None
-        return {"status": "rejected"}
+        with self._state_lock:
+            pending_signal = self.pending_signal
+            corr_id = self.pending_correlation_id
+            if not pending_signal:
+                return {"status": "no_pending_signal"}
+            self.pending_signal = None
+            self.pending_expiry = None
+            self.pending_correlation_id = None
+
+        self.logger.info(
+            "mode=%s approval=REJECTED signal=%s correlation_id=%s",
+            self.mode_manager.mode.value,
+            pending_signal,
+            corr_id,
+        )
+        return {"status": "rejected", "correlation_id": corr_id}
 
     def switch_mode(self, target_mode: TradingMode, confirm_live: bool) -> Dict:
         event = self.mode_manager.switch_mode(
@@ -119,22 +200,29 @@ class TradingEngine:
         }
 
     def approval_countdown(self) -> int:
-        if not self.pending_expiry:
+        with self._state_lock:
+            pending_expiry = self.pending_expiry
+        if not pending_expiry:
             return 0
-        return max(int((self.pending_expiry - datetime.now()).total_seconds()), 0)
+        return max(int((pending_expiry - datetime.now()).total_seconds()), 0)
 
     def status(self) -> Dict:
         stats = self.portfolio.stats()
+        with self._state_lock:
+            pending_signal = self.pending_signal
+            last_signal = self.last_signal
+            corr_id = self.pending_correlation_id
         return {
             "mode": self.mode_manager.mode.value,
             "bot_status": "RUNNING",
             "position": stats["open_position"],
             "today_pnl": stats["realized_pnl"],
-            "pending_signal": self.pending_signal,
+            "pending_signal": pending_signal,
+            "pending_correlation_id": corr_id,
             "approval_countdown": self.approval_countdown(),
             "win_rate": stats["win_rate"],
             "drawdown": stats["max_drawdown"],
             "trades_today": self.risk.trades_today,
             "losses_today": self.risk.losses_today,
-            "last_signal": self.last_signal,
+            "last_signal": last_signal,
         }
