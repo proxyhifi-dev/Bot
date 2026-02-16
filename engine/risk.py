@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time
+import threading
 
 
 @dataclass
@@ -32,6 +33,7 @@ class RiskManager:
         self._trades_today = 0
         self._losses_today = 0
         self._last_reset_day = datetime.now().date()
+        self._lock = threading.Lock()
 
     def _roll_day(self) -> None:
         today = datetime.now().date()
@@ -48,30 +50,34 @@ class RiskManager:
         return max(int(risk_amount / risk_per_unit), 0)
 
     def can_open_new_trade(self, now: datetime) -> RiskSnapshot:
-        self._roll_day()
-        if now.time() > self.no_new_trades_after:
-            return RiskSnapshot(self._trades_today, self._losses_today, True, "No new trade after 2:45 PM")
-        if self._trades_today >= self.max_trades_per_day:
-            return RiskSnapshot(self._trades_today, self._losses_today, True, "Max trades/day reached")
-        if self._losses_today >= self.max_losses_per_day:
-            return RiskSnapshot(self._trades_today, self._losses_today, True, "Stopped after 2 losses")
-        return RiskSnapshot(self._trades_today, self._losses_today, False, "")
+        with self._lock:
+            self._roll_day()
+            if now.time() > self.no_new_trades_after:
+                return RiskSnapshot(self._trades_today, self._losses_today, True, "No new trade after 2:45 PM")
+            if self._trades_today >= self.max_trades_per_day:
+                return RiskSnapshot(self._trades_today, self._losses_today, True, "Max trades/day reached")
+            if self._losses_today >= self.max_losses_per_day:
+                return RiskSnapshot(self._trades_today, self._losses_today, True, "Stopped after 2 losses")
+            return RiskSnapshot(self._trades_today, self._losses_today, False, "")
 
     def register_trade(self, pnl: float) -> None:
-        self._roll_day()
-        self._trades_today += 1
-        if pnl < 0:
-            self._losses_today += 1
+        with self._lock:
+            self._roll_day()
+            self._trades_today += 1
+            if pnl < 0:
+                self._losses_today += 1
 
     def should_force_square_off(self, now: datetime) -> bool:
         return now.time() >= self.force_square_off
 
     @property
     def trades_today(self) -> int:
-        self._roll_day()
-        return self._trades_today
+        with self._lock:
+            self._roll_day()
+            return self._trades_today
 
     @property
     def losses_today(self) -> int:
-        self._roll_day()
-        return self._losses_today
+        with self._lock:
+            self._roll_day()
+            return self._losses_today
