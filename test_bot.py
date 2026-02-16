@@ -1,34 +1,39 @@
 import unittest
-from engine.risk import RiskManager
+
+from engine.mode import ModeManager, TradingMode
 from engine.portfolio import Portfolio
-from engine.execution import ExecutionEngine
+from engine.risk import RiskManager
+
 
 class TestRiskManager(unittest.TestCase):
     def test_position_size(self):
-        risk = RiskManager(100000, risk_per_trade=0.01, max_daily_loss=0.03)
+        risk = RiskManager(100000)
         qty = risk.calculate_position_size(22000, 21950)
         self.assertTrue(qty > 0)
 
-    def test_can_trade(self):
-        risk = RiskManager(100000, risk_per_trade=0.01, max_daily_loss=0.03)
-        self.assertTrue(risk.can_trade())
-        risk.update_loss(4000)
-        self.assertFalse(risk.can_trade())
+    def test_trade_limits(self):
+        risk = RiskManager(100000, max_trades_per_day=1)
+        snap = risk.can_open_new_trade(__import__('datetime').datetime.now())
+        self.assertFalse(snap.blocked)
+        risk.register_trade(-100)
+        snap_after = risk.can_open_new_trade(__import__('datetime').datetime.now())
+        self.assertTrue(snap_after.blocked)
+
 
 class TestPortfolio(unittest.TestCase):
     def test_add_and_close_position(self):
         pf = Portfolio()
-        pf.add_position('NIFTY', 10, 22000)
-        pnl = pf.close_position('NIFTY', 22100)
+        pf.open_trade('NIFTY', 'BUY', 10, 22000, 21950, 22100, 'PAPER')
+        pnl = pf.close_trade(22100, 'Target hit')
         self.assertEqual(pnl, 1000)
 
-class TestExecutionEngine(unittest.TestCase):
-    def test_execute_and_close_trade(self):
-        risk = RiskManager(100000, risk_per_trade=0.01, max_daily_loss=0.03)
-        pf = Portfolio()
-        exec_engine = ExecutionEngine(risk, pf)
-        exec_engine.execute_trade('NIFTY', 'BUY', 22000, 21950)
-        exec_engine.close_trade('NIFTY', 22100)
+
+class TestModeManager(unittest.TestCase):
+    def test_live_requires_confirmation(self):
+        mm = ModeManager(TradingMode.PAPER)
+        with self.assertRaises(ValueError):
+            mm.switch_mode(TradingMode.LIVE, has_open_position=False, confirm_live=False, auth_validator=lambda: True)
+
 
 if __name__ == '__main__':
     unittest.main()
