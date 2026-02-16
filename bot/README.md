@@ -51,10 +51,6 @@ cp .env.example .env
 
 Fill `.env` values.
 
-Tip for intermittent 503 issues:
-- Keep `FYERS_BASE_URL=https://api.fyers.in`
-- Set `FYERS_FALLBACK_BASE_URLS=https://api-t1.fyers.in`
-
 ## 5) Run
 
 ```bash
@@ -90,9 +86,7 @@ Authorization: client_id:access_token
 ### 502 / 503 (Gateway/service instability)
 - Cooldown delay before retry.
 - Circuit breaker opens after repeated failures and pauses trading API calls.
-- Health check probes `/api/v3/generate-authcode` instead of only root URL to avoid false 503 signals.
-- Automatic fallback base URL switching (for example to `https://api-t1.fyers.in`) when primary endpoint remains unhealthy.
-- OAuth/trading is blocked only after retries fail across all configured base URLs.
+- Health check guard (`GET https://api.fyers.in`) blocks OAuth/trading attempts when service is unhealthy.
 
 ## 8) CLI Capabilities
 
@@ -125,13 +119,3 @@ Format:
 - Keep `.env` and token files out of source control.
 - Use least-privilege runtime user and secure host.
 - Validate payload fields against latest Fyers docs before sending live orders.
-
-
-## 11) Troubleshooting 503 During Login
-
-If you are able to log in previously but now get 503:
-
-1. Confirm `.env` has fallback URLs configured.
-2. Re-run `python run.py` and check the printed `Using FYERS base URL:` line.
-3. If both primary and fallback fail, wait a few minutes and retry (gateway incidents are often transient).
-4. Keep retries moderate (`FYERS_MAX_RETRIES=5`) to avoid aggressive traffic while the service is unstable.

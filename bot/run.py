@@ -26,8 +26,6 @@ def main() -> None:
         print("Aborting before OAuth/trading calls.")
         return
 
-    print(f"Using FYERS base URL: {config.base_url}")
-
     auth = FyersAuthManager(config, logger)
     access_token = auth.get_valid_access_token()
     print("Authentication successful.")

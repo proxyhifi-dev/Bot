@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from dotenv import load_dotenv
 
@@ -18,8 +18,6 @@ class FyersConfig:
     redirect_uri: str
     base_url: str
     token_file: Path
-    fallback_base_urls: List[str]
-    health_probe_path: str
     max_retries: int = 5
     backoff_base: float = 1.0
     timeout_seconds: int = 15
@@ -53,13 +51,6 @@ def setup_logger(log_file: str = "logs/bot.log") -> logging.Logger:
     return logger
 
 
-def _parse_csv_env(name: str) -> List[str]:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return []
-    return [value.strip().rstrip("/") for value in raw.split(",") if value.strip()]
-
-
 def load_config() -> FyersConfig:
     load_dotenv()
     required = ["FYERS_CLIENT_ID", "FYERS_SECRET_KEY", "FYERS_REDIRECT_URI"]
@@ -70,17 +61,12 @@ def load_config() -> FyersConfig:
     token_file = Path(os.getenv("FYERS_TOKEN_FILE", ".secrets/fyers_token.json"))
     token_file.parent.mkdir(parents=True, exist_ok=True)
 
-    primary_base = os.getenv("FYERS_BASE_URL", "https://api.fyers.in").rstrip("/")
-    fallback = _parse_csv_env("FYERS_FALLBACK_BASE_URLS")
-
     return FyersConfig(
         client_id=os.getenv("FYERS_CLIENT_ID", "").strip(),
         secret_key=os.getenv("FYERS_SECRET_KEY", "").strip(),
         redirect_uri=os.getenv("FYERS_REDIRECT_URI", "").strip(),
-        base_url=primary_base,
+        base_url=os.getenv("FYERS_BASE_URL", "https://api.fyers.in").rstrip("/"),
         token_file=token_file,
-        fallback_base_urls=fallback,
-        health_probe_path=os.getenv("FYERS_HEALTH_PROBE_PATH", "/api/v3/generate-authcode"),
         max_retries=int(os.getenv("FYERS_MAX_RETRIES", "5")),
         backoff_base=float(os.getenv("FYERS_BACKOFF_BASE", "1.0")),
         timeout_seconds=int(os.getenv("FYERS_HTTP_TIMEOUT", "15")),
