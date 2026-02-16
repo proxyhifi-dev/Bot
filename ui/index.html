@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dual Mode Trading Console</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0f172a; color: #f8fafc; }
+    .wrap { max-width: 1100px; margin: 20px auto; padding: 16px; }
+    .row { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+    .card { background: #1e293b; border-radius: 10px; padding: 12px; }
+    .mode-paper { background: #ca8a04; color: #111827; font-weight: 700; padding: 6px 10px; border-radius: 8px; }
+    .mode-live { background: #b91c1c; color: #fff; font-weight: 700; padding: 6px 10px; border-radius: 8px; }
+    button { padding: 8px 12px; border: 0; border-radius: 8px; margin-right: 8px; cursor: pointer; }
+    .ok { background: #16a34a; color: white; }
+    .no { background: #dc2626; color: white; }
+    .warn { background: #d97706; color: white; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { border-bottom: 1px solid #334155; text-align: left; padding: 8px; font-size: 13px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h2>NIFTY 5m Supertrend Bot</h2>
+  <div class="card">
+    <span id="modeBadge" class="mode-paper">PAPER MODE</span>
+    <button class="warn" id="toggleMode">Switch Mode</button>
+    <button class="ok" id="authBtn">Authenticate Fyers</button>
+    <button class="ok" id="approveBtn">Approve</button>
+    <button class="no" id="rejectBtn">Reject</button>
+  </div>
+
+  <div class="row" style="margin-top: 12px;">
+    <div class="card"><b>Bot Status:</b> <span id="botStatus">-</span></div>
+    <div class="card"><b>Current Position:</b> <span id="position">-</span></div>
+    <div class="card"><b>Today's PnL:</b> ₹<span id="pnl">0</span></div>
+    <div class="card"><b>Pending Signal:</b> <span id="pending">-</span></div>
+    <div class="card"><b>Approval Countdown:</b> <span id="countdown">0</span>s</div>
+    <div class="card"><b>Win Rate:</b> <span id="winrate">0</span>%</div>
+    <div class="card"><b>Fyers Auth:</b> <span id="authStatus">UNKNOWN</span></div>
+  </div>
+
+  <div class="card" style="margin-top: 12px;">
+    <h3>Trade History</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Mode</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Reason</th></tr></thead>
+      <tbody id="tradesBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+async function api(url, method='GET', body=null){
+  const res = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body): null});
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.detail || 'Request failed');
+  return data;
+}
+
+function setMode(mode){
+  const badge = document.getElementById('modeBadge');
+  badge.className = mode === 'LIVE' ? 'mode-live' : 'mode-paper';
+  badge.textContent = mode === 'LIVE' ? 'LIVE MODE' : 'PAPER MODE';
+}
+
+async function refresh(){
+  const st = await api('/status');
+  setMode(st.mode);
+  document.getElementById('botStatus').textContent = st.bot_status;
+  document.getElementById('position').textContent = st.position ? `${st.position.side} ${st.position.qty} @ ${st.position.entry_price}` : 'NONE';
+  document.getElementById('pnl').textContent = Number(st.today_pnl).toFixed(2);
+  document.getElementById('pending').textContent = st.pending_signal ? `${st.pending_signal.side} ${st.pending_signal.qty}` : 'NONE';
+  document.getElementById('countdown').textContent = st.approval_countdown;
+  document.getElementById('winrate').textContent = Number(st.win_rate).toFixed(2);
+
+  const auth = await api('/auth/status');
+  document.getElementById('authStatus').textContent = auth.token_valid ? 'VALID' : 'INVALID';
+
+  document.getElementById('toggleMode').disabled = !!st.position;
+
+  const trades = await api('/trades');
+  const body = document.getElementById('tradesBody');
+  body.innerHTML = '';
+  trades.trades.slice().reverse().forEach(t => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${t.exit_time || t.entry_time}</td><td>${t.mode}</td><td>${t.side}</td><td>${t.entry}</td><td>${t.exit}</td><td>${Number(t.pnl).toFixed(2)}</td><td>${t.reason}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+document.getElementById('approveBtn').onclick = async ()=>{ try { await api('/approve', 'POST'); await refresh(); } catch(e){ alert(e.message);} };
+document.getElementById('rejectBtn').onclick = async ()=>{ try { await api('/reject', 'POST'); await refresh(); } catch(e){ alert(e.message);} };
+
+document.getElementById('authBtn').onclick = ()=>{ window.open('/auth/login','_blank'); };
+
+document.getElementById('toggleMode').onclick = async ()=>{
+  try {
+    const current = (await api('/mode')).mode;
+    const target = current === 'PAPER' ? 'LIVE' : 'PAPER';
+    const ok = confirm(`Switch mode from ${current} to ${target}?`);
+    if(!ok) return;
+    const confirm_live = target === 'LIVE' ? confirm('FINAL CONFIRM: LIVE mode places real orders. Continue?') : false;
+    await api('/mode/switch','POST',{mode: target, confirm_live});
+    await refresh();
+  } catch(e){ alert(e.message); }
+};
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

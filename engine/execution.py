@@ -1,60 +1,88 @@
+from __future__ import annotations
+
+from dataclasses import asdict
 from datetime import datetime
-import os
-
 import logging
+from typing import Dict
 
-class ExecutionEngine:
-    def __init__(self, risk_manager=None, portfolio=None, paper=True):
-        self.risk = risk_manager
+from engine.mode import TradingMode, ModeManager
+from engine.portfolio import Portfolio
+from execution.fyers_adapter import FyersAdapter
+
+
+class PaperExecutionSimulator:
+    def execute_entry(self, portfolio: Portfolio, signal: Dict, ltp: float, mode: TradingMode):
+        return portfolio.open_trade(
+            symbol=signal["symbol"],
+            side=signal["side"],
+            qty=signal["qty"],
+            entry_price=ltp,
+            stop_loss=signal["stop_loss"],
+            target=signal["target"],
+            mode=mode.value,
+        )
+
+
+class TradeExecutor:
+    def __init__(self, mode_manager: ModeManager, portfolio: Portfolio, fyers: FyersAdapter):
+        self.mode_manager = mode_manager
         self.portfolio = portfolio
-        self.paper = paper
-        os.makedirs("logs", exist_ok=True)
+        self.fyers = fyers
+        self.paper = PaperExecutionSimulator()
+        self.logger = logging.getLogger("execution")
 
-    def execute_trade(self, symbol, action, entry_price, stop_loss):
-        try:
-            if self.risk and not self.risk.can_trade():
-                logging.warning("❌ Daily loss limit reached.")
-                print("❌ Daily loss limit reached.")
-                return
+    def enter_trade(self, signal: Dict, ltp: float) -> Dict:
+        mode = self.mode_manager.mode
+        if mode == TradingMode.PAPER:
+            p = self.paper.execute_entry(self.portfolio, signal, ltp, mode)
+            self.logger.info("mode=%s action=ENTRY symbol=%s qty=%s price=%s", mode.value, p.symbol, p.qty, ltp)
+            return {"status": "filled", "mode": mode.value, "position": asdict(p), "broker": "simulator"}
 
-            qty = self.risk.calculate_position_size(entry_price, stop_loss) if self.risk else 1
+        if mode == TradingMode.LIVE:
+            order = {
+                "symbol": signal["symbol"],
+                "qty": signal["qty"],
+                "type": 2,
+                "side": 1 if signal["side"] == "BUY" else -1,
+                "productType": "INTRADAY",
+            }
+            broker_resp = self.fyers.place_order(order)
+            p = self.portfolio.open_trade(
+                symbol=signal["symbol"],
+                side=signal["side"],
+                qty=signal["qty"],
+                entry_price=ltp,
+                stop_loss=signal["stop_loss"],
+                target=signal["target"],
+                mode=mode.value,
+            )
+            self.logger.info("mode=%s action=ENTRY symbol=%s qty=%s price=%s", mode.value, p.symbol, p.qty, ltp)
+            return {"status": "filled", "mode": mode.value, "position": asdict(p), "broker": broker_resp}
 
-            if qty <= 0:
-                logging.warning("❌ Invalid position size.")
-                print("❌ Invalid position size.")
-                return
+        raise ValueError("Unknown mode")
 
-            print(f"\n📊 EXECUTING {action} {symbol}")
-            print(f"Qty: {qty} | Entry: {entry_price} | SL: {stop_loss}")
-            logging.info(f"EXECUTING {action} {symbol} Qty: {qty} | Entry: {entry_price} | SL: {stop_loss}")
+    def exit_trade(self, ltp: float, reason: str) -> Dict:
+        mode = self.mode_manager.mode
+        if not self.portfolio.has_open_position():
+            return {"status": "no_open_position"}
 
-            if action == "BUY" and self.portfolio:
-                self.portfolio.add_position(symbol, qty, entry_price)
+        if mode == TradingMode.LIVE:
+            p = self.portfolio.open_position
+            order = {
+                "symbol": p.symbol,
+                "qty": p.qty,
+                "type": 2,
+                "side": -1 if p.side == "BUY" else 1,
+                "productType": "INTRADAY",
+            }
+            self.fyers.place_order(order)
 
-            self.log_trade(symbol, action, qty, entry_price, stop_loss)
-        except Exception as e:
-            logging.error(f"ExecutionEngine execute_trade error: {e}")
-
-    def close_trade(self, symbol, exit_price):
-        try:
-            pnl = self.portfolio.close_position(symbol, exit_price) if self.portfolio else 0
-
-            if pnl < 0 and self.risk:
-                self.risk.update_loss(abs(pnl))
-
-            print(f"\n📈 Trade Closed | PnL: {pnl}")
-            logging.info(f"Trade Closed | {symbol} | PnL: {pnl}")
-
-            with open("logs/trades.log", "a") as f:
-                f.write(f"{datetime.now()} | CLOSE | {symbol} | PnL: {pnl}\n")
-        except Exception as e:
-            logging.error(f"ExecutionEngine close_trade error: {e}")
-
-    def log_trade(self, symbol, action, qty, entry, sl):
-        try:
-            with open("logs/trades.log", "a") as f:
-                f.write(
-                    f"{datetime.now()} | {symbol} | {action} | Qty:{qty} | Entry:{entry} | SL:{sl}\n"
-                )
-        except Exception as e:
-            logging.error(f"ExecutionEngine log_trade error: {e}")
+        pnl = self.portfolio.close_trade(ltp, reason)
+        self.logger.info(
+            "mode=%s action=EXIT timestamp=%s reason=%s pnl=%s",
+            mode.value,
+            datetime.now().isoformat(),
+            reason,
+            pnl,
+        )
+        return {"status": "closed", "mode": mode.value, "pnl": pnl}
