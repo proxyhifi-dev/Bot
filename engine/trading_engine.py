@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 import uuid
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from engine.execution import TradeExecutor
 from engine.live_data import LiveMarketData
@@ -39,6 +39,8 @@ class TradingEngine:
 
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._running = False
+        self._engine_thread: Optional[threading.Thread] = None
         self._approval_timeout_thread = threading.Thread(
             target=self._approval_timeout_loop,
             name="approval-timeout-engine",
@@ -70,8 +72,36 @@ class TradingEngine:
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._engine_thread and self._engine_thread.is_alive():
+            self._engine_thread.join(timeout=3)
         if self._approval_timeout_thread.is_alive():
             self._approval_timeout_thread.join(timeout=2)
+        self._running = False
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._stop_event.clear()
+        self._running = True
+        self._engine_thread = threading.Thread(target=self._engine_loop, name="trading-engine-loop", daemon=True)
+        self._engine_thread.start()
+
+    def _engine_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                result = self.evaluate_market()
+                if result.get("event") in {"risk_block", "no_candles"}:
+                    time.sleep(2)
+                else:
+                    time.sleep(1)
+            except Exception as exc:  # pragma: no cover - defensive safety loop
+                self.logger.exception("engine_loop_error error=%s", exc)
+                time.sleep(5)
+
+    def emergency_stop(self) -> Dict[str, Any]:
+        self.stop()
+        self._log_event("emergency_stop", details={"stopped": True})
+        return {"status": "stopped"}
 
     def bootstrap_live_positions(self) -> None:
         if self.mode_manager.mode != TradingMode.LIVE:
@@ -228,3 +258,13 @@ class TradingEngine:
             "losses_today": self.risk.losses_today,
             "last_signal": last_signal,
         }
+
+    def _log_event(self, event: str, details: Dict[str, Any]) -> None:
+        payload = {
+            "timestamp": datetime.now().isoformat(),
+            "event": event,
+            "mode": self.mode_manager.mode.value,
+            "trade_id": self.pending_correlation_id,
+            "details": details,
+        }
+        self.logger.info(json.dumps(payload))

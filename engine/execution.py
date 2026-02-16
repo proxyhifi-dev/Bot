@@ -32,6 +32,18 @@ class TradeExecutor:
         self.logger = logging.getLogger("execution")
 
     def enter_trade(self, signal: Dict, ltp: float) -> Dict:
+        if self.portfolio.has_open_position():
+            return {"status": "rejected", "reason": "open_position_exists"}
+
+        required_keys = {"symbol", "side", "qty", "stop_loss", "target"}
+        missing = [k for k in required_keys if k not in signal]
+        if missing:
+            raise ValueError(f"Signal missing required fields: {', '.join(sorted(missing))}")
+        if signal["side"] not in {"BUY", "SELL"}:
+            raise ValueError("Signal side must be BUY or SELL")
+        if not isinstance(signal["qty"], int) or signal["qty"] <= 0:
+            raise ValueError("Signal qty must be a positive integer")
+
         mode = self.mode_manager.mode
         if mode == TradingMode.PAPER:
             p = self.paper.execute_entry(self.portfolio, signal, ltp, mode)
