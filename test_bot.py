@@ -1,3 +1,6 @@
+import hashlib
+import os
+import tempfile
 import unittest
 
 from engine.mode import ModeManager, TradingMode
