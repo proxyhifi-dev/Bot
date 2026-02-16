@@ -53,7 +53,7 @@ def setup_logger(log_file: str = "logs/bot.log") -> logging.Logger:
 
 def load_config() -> FyersConfig:
     load_dotenv()
-    required = ["FYERS_CLIENT_ID", "FYERS_SECRET_KEY", "FYERS_REDIRECT_URI"]
+    required = ["FYERS_CLIENT_ID", "FYERS_SECRET_KEY", "FYERS_REDIRECT_URI", "FYERS_BASE_URL"]
     missing = [name for name in required if not os.getenv(name)]
     if missing:
         raise ValueError(f"Missing required environment keys: {', '.join(missing)}")
@@ -65,7 +65,7 @@ def load_config() -> FyersConfig:
         client_id=os.getenv("FYERS_CLIENT_ID", "").strip(),
         secret_key=os.getenv("FYERS_SECRET_KEY", "").strip(),
         redirect_uri=os.getenv("FYERS_REDIRECT_URI", "").strip(),
-        base_url=os.getenv("FYERS_BASE_URL", "https://api.fyers.in").rstrip("/"),
+        base_url=os.getenv("FYERS_BASE_URL", "").strip().rstrip("/"),
         token_file=token_file,
         max_retries=int(os.getenv("FYERS_MAX_RETRIES", "5")),
         backoff_base=float(os.getenv("FYERS_BACKOFF_BASE", "1.0")),
