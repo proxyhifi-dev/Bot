@@ -6,7 +6,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 import uvicorn
 
-from api.main import configure_logging
 from execution.fyers_adapter import FyersAdapter
 
 
@@ -14,6 +13,8 @@ def main() -> None:
     load_dotenv()
     Path("logs").mkdir(parents=True, exist_ok=True)
     Path(".secrets").mkdir(parents=True, exist_ok=True)
+    from api.main import configure_logging
+
     configure_logging()
 
     fyers = FyersAdapter()
