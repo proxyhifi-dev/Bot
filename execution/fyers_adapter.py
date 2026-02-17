@@ -11,9 +11,6 @@ from typing import Any, Dict, List
 from urllib.parse import parse_qs, urlparse
 
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
 
 
 class FyersAdapter:
@@ -67,6 +64,10 @@ class FyersAdapter:
         # Auth Cooldown
         # ----------------------------
         self._auth_lock = threading.Lock()
+        self._token_validation_lock = threading.Lock()
+        self._token_validation_ttl_seconds = int(os.getenv("FYERS_TOKEN_VALIDATION_TTL_SECONDS", "15"))
+        self._last_token_validation_ts = 0.0
+        self._last_token_validation_result = False
         self._auth_fail_lock = threading.Lock()
         self._last_auth_failure_ts = 0.0
         self._auth_failure_cooldown_seconds = int(
@@ -169,6 +170,7 @@ class FyersAdapter:
 
         self.access_token = token
         self._save_token(token)
+        self.validate_token(force=True)
         return data
 
     def authenticate_interactive(self) -> bool:
@@ -203,14 +205,24 @@ class FyersAdapter:
             return self.authenticate_interactive()
         return False
 
-    def validate_token(self) -> bool:
+    def validate_token(self, force: bool = False) -> bool:
         if not self.access_token:
             return False
-        try:
-            resp = self._request_with_backoff("GET", "/api/v3/profile", headers=self._headers())
-            return resp.status_code == 200
-        except Exception:
-            return False
+
+        with self._token_validation_lock:
+            now = time.time()
+            if not force and (now - self._last_token_validation_ts) < self._token_validation_ttl_seconds:
+                return self._last_token_validation_result
+
+            try:
+                resp = self._request_with_backoff("GET", "/api/v3/profile", headers=self._headers())
+                valid = resp.status_code == 200
+            except Exception:
+                valid = False
+
+            self._last_token_validation_ts = now
+            self._last_token_validation_result = valid
+            return valid
 
     # ============================================================
     # MARKET DATA
