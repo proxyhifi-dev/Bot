@@ -68,9 +68,30 @@ run.py
 7. Future runs auto-load token and validate via `/api/v3/profile`.
 8. If invalid/expired, manual login is requested again.
 
-> No username/password/PIN/TOTP is automated by code.
+> Default mode uses manual login.
+> Optional: set `FYERS_AUTO_AUTH=true` with `FYERS_USER_ID`, `FYERS_PIN`, and `FYERS_TOTP_SECRET` to enable automated auth-code generation (similar to the `fyers-api-access-token-v3` flow).
 
 ---
+
+## Automated OAuth (Optional)
+
+If you want non-interactive startup:
+
+```bash
+FYERS_AUTO_AUTH=true
+FYERS_USER_ID=<your_fyers_id>
+FYERS_PIN=<4_digit_pin>
+FYERS_TOTP_SECRET=<base32_totp_secret>
+```
+
+Then run normally (`python run.py`). The bot will:
+1. Request login OTP from Fyers auth API
+2. Generate TOTP locally
+3. Verify PIN to get a temporary bearer token
+4. Request auth code URL
+5. Exchange auth code for access token and persist it
+
+Manual flow remains available as fallback if `FYERS_AUTO_AUTH` is false.
 
 ## How to Run Bot
 
