@@ -15,6 +15,60 @@ This bot trades **NIFTY 5m candles** using **Supertrend(10,3)** and enforces str
 
 ---
 
+## Quick Answer: authentication + run + what you get
+
+### 1) How authentication works
+
+You have **2 authentication modes**:
+
+- **Manual (default)**
+  - Bot prints login URL.
+  - You login in browser.
+  - You paste callback URL/code in terminal.
+  - Bot stores `access_token` in `FYERS_TOKEN_FILE`.
+
+- **Auto (optional)**
+  - Set `FYERS_AUTO_AUTH=true`.
+  - Provide `FYERS_USER_ID`, `FYERS_PIN`, `FYERS_TOTP_SECRET`.
+  - Bot generates auth code automatically and exchanges token.
+
+In both modes, token is validated via FYERS profile API before LIVE actions.
+
+### 2) How to run
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+# fill all FYERS_* values in .env
+python run.py
+```
+
+Open UI at:
+
+```text
+http://127.0.0.1:8000/
+```
+
+### 3) What you get
+
+- Dual mode trading: `PAPER` + `LIVE`
+- Supertrend strategy execution loop
+- Manual approve/reject workflow for entries
+- Risk controls (max trades/day, stop after losses, session cutoffs)
+- Health/mode/status/PnL APIs
+- Trade logs persisted to `logs/trades.log`
+
+### 4) What it has (main APIs)
+
+- `GET /health` → auth + service health
+- `GET /status` → current runtime status
+- `GET /signal` → current evaluated signal
+- `POST /approve` / `POST /reject` → action pending signal
+- `POST /mode/switch` → switch PAPER/LIVE
+- `GET /pnl` and `GET /trades` → performance + trade ledger
+
+---
+
 ## Architecture Diagram (Text)
 
 ```text
