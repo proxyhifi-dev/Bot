@@ -162,23 +162,42 @@ class FyersAdapter:
         if not auth_code:
             raise ValueError("Auth code cannot be empty")
 
-        payload = {
+        base_payload = {
             "grant_type": "authorization_code",
             "appIdHash": self._app_id_hash(),
-            "code": auth_code,
         }
 
-        resp = self._request_with_backoff("POST", "/api/v3/token", json=payload)
-        data = resp.json()
+        # FYERS token APIs have used both `code` and `auth_code` keys depending
+        # on gateway/versioning. Try both to keep login robust across accounts.
+        payload_attempts = [
+            {**base_payload, "code": auth_code},
+            {**base_payload, "auth_code": auth_code},
+        ]
 
-        token = data.get("access_token")
-        if not token:
-            raise RuntimeError(f"OAuth exchange failed: {data}")
+        last_error: Optional[Exception] = None
+        for payload in payload_attempts:
+            try:
+                resp = self._request_with_backoff("POST", "/api/v3/token", json=payload)
+                data = resp.json()
 
-        self.access_token = token
-        self._save_token(token)
-        self.validate_token(force=True)
-        return data
+                token = data.get("access_token")
+                if not token:
+                    raise RuntimeError(f"OAuth exchange failed: {data}")
+
+                self.access_token = token
+                self._save_token(token)
+                self.validate_token(force=True)
+                return data
+            except requests.HTTPError as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                # Retry with alternate payload key only for auth-related errors.
+                if status not in (400, 401):
+                    raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("OAuth exchange failed for all supported payload variants")
 
     def authenticate_interactive(self) -> bool:
         with self._auth_lock:
@@ -343,7 +362,11 @@ class FyersAdapter:
     def _extract_auth_code(value: str) -> str:
         if value.startswith("http"):
             parsed = urlparse(value)
-            return parse_qs(parsed.query).get("code", [""])[0]
+            query = parse_qs(parsed.query)
+            # FYERS callback URLs can include both `code` (status code) and
+            # `auth_code` (actual authorization code). Prefer auth_code when
+            # available to avoid exchanging an HTTP status value like "200".
+            return query.get("auth_code", [""])[0] or query.get("code", [""])[0]
         return value.strip()
 
     def _can_attempt_authentication(self) -> bool:
