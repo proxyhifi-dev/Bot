@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
+import struct
 import threading
 import time
 from pathlib import Path
@@ -34,6 +37,10 @@ class FyersAdapter:
         self.secret_key = os.getenv("FYERS_SECRET_KEY", "").strip()
         self.redirect_uri = os.getenv("FYERS_REDIRECT_URI", "").strip()
         self.base_url = os.getenv("FYERS_BASE_URL", "").strip()
+        self.fyers_user_id = os.getenv("FYERS_USER_ID", "").strip()
+        self.fyers_pin = os.getenv("FYERS_PIN", "").strip()
+        self.fyers_totp_secret = os.getenv("FYERS_TOTP_SECRET", "").strip()
+        self.enable_auto_auth = os.getenv("FYERS_AUTO_AUTH", "false").strip().lower() == "true"
 
         if not self.client_id:
             raise RuntimeError("FYERS_CLIENT_ID not set")
@@ -198,8 +205,31 @@ class FyersAdapter:
                 self._mark_auth_failure()
                 raise
 
+    def authenticate_auto(self) -> bool:
+        with self._auth_lock:
+            if self.validate_token():
+                return True
+
+            if not self._can_attempt_authentication():
+                raise RuntimeError("Authentication cooldown active. Please wait.")
+
+            try:
+                auth_code = self._generate_auth_code_auto()
+                self.exchange_auth_code(auth_code)
+                if not self.validate_token(force=True):
+                    self._mark_auth_failure()
+                    raise RuntimeError("Auto-auth token validation failed")
+                self.logger.info("Auto authentication succeeded")
+                return True
+            except Exception:
+                self._mark_auth_failure()
+                raise
+
     def ensure_authenticated(self, interactive: bool = False) -> bool:
         if self.validate_token():
+            return True
+        if self.enable_auto_auth:
+            self.authenticate_auto()
             return True
         if interactive:
             return self.authenticate_interactive()
@@ -323,3 +353,90 @@ class FyersAdapter:
     def _mark_auth_failure(self) -> None:
         with self._auth_fail_lock:
             self._last_auth_failure_ts = time.time()
+
+
+    @staticmethod
+    def _generate_totp(secret: str, interval: int = 30, digits: int = 6) -> str:
+        normalized = secret.strip().replace(" ", "").upper()
+        key = base64.b32decode(normalized + "=" * ((8 - len(normalized) % 8) % 8))
+        timestep = int(time.time() // interval)
+        msg = struct.pack(">Q", timestep)
+        digest = hmac.new(key, msg, hashlib.sha1).digest()
+        offset = digest[-1] & 0x0F
+        code = ((digest[offset] & 0x7F) << 24) | ((digest[offset + 1] & 0xFF) << 16) | ((digest[offset + 2] & 0xFF) << 8) | (digest[offset + 3] & 0xFF)
+        return str(code % (10 ** digits)).zfill(digits)
+
+    def _generate_auth_code_auto(self) -> str:
+        self._validate_auto_auth_settings()
+
+        otp_request_key = self._send_login_otp()
+        verify_otp_request_key = self._verify_totp(otp_request_key)
+        pin_access_token = self._verify_pin(verify_otp_request_key)
+        return self._request_auth_code(pin_access_token)
+
+    def _validate_auto_auth_settings(self) -> None:
+        missing = []
+        if not self.fyers_user_id:
+            missing.append("FYERS_USER_ID")
+        if not self.fyers_pin:
+            missing.append("FYERS_PIN")
+        if not self.fyers_totp_secret:
+            missing.append("FYERS_TOTP_SECRET")
+        if missing:
+            raise RuntimeError(f"Auto authentication missing env vars: {', '.join(missing)}")
+
+    def _send_login_otp(self) -> str:
+        payload = {"fy_id": self.fyers_user_id, "app_id": "2"}
+        resp = self.session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        request_key = data.get("request_key")
+        if not request_key:
+            raise RuntimeError(f"Unable to send OTP: {data}")
+        return request_key
+
+    def _verify_totp(self, request_key: str) -> str:
+        totp = self._generate_totp(self.fyers_totp_secret)
+        payload = {"request_key": request_key, "otp": totp}
+        resp = self.session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        verified_request_key = data.get("request_key")
+        if not verified_request_key:
+            raise RuntimeError(f"Unable to verify TOTP: {data}")
+        return verified_request_key
+
+    def _verify_pin(self, request_key: str) -> str:
+        payload = {"request_key": request_key, "identity_type": "pin", "identifier": self.fyers_pin}
+        resp = self.session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        access_token = data.get("data", {}).get("access_token")
+        if not access_token:
+            raise RuntimeError(f"Unable to verify pin: {data}")
+        return access_token
+
+    def _request_auth_code(self, pin_access_token: str) -> str:
+        payload = {
+            "fyers_id": self.fyers_user_id,
+            "app_id": self.client_id.split("-")[0],
+            "redirect_uri": self.redirect_uri,
+            "appType": "100",
+            "code_challenge": "",
+            "state": "auto_auth",
+            "scope": "",
+            "nonce": "",
+            "response_type": "code",
+            "create_cookie": True,
+        }
+        headers = {"Authorization": f"Bearer {pin_access_token}"}
+        resp = self.session.post("https://api.fyers.in/api/v2/token", json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        redirect_url = data.get("Url") or data.get("url")
+        if not redirect_url:
+            raise RuntimeError(f"Unable to fetch auth code URL: {data}")
+        auth_code = self._extract_auth_code(redirect_url)
+        if not auth_code:
+            raise RuntimeError(f"Auth code missing in redirect URL: {redirect_url}")
+        return auth_code

@@ -38,5 +38,62 @@ class TestModeManager(unittest.TestCase):
             mm.switch_mode(TradingMode.LIVE, has_open_position=False, confirm_live=False, auth_validator=lambda: True)
 
 
+
+
+class TestFyersAdapterAuthRouting(unittest.TestCase):
+    def setUp(self):
+        self.prev_env = dict(os.environ)
+        os.environ["FYERS_CLIENT_ID"] = "ABCD1234-100"
+        os.environ["FYERS_SECRET_KEY"] = "secret"
+        os.environ["FYERS_REDIRECT_URI"] = "http://127.0.0.1"
+        os.environ["FYERS_BASE_URL"] = "https://api-t1.fyers.in"
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            self.token_path = tmp.name
+        os.environ["FYERS_TOKEN_FILE"] = self.token_path
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.prev_env)
+        try:
+            os.remove(self.token_path)
+        except OSError:
+            pass
+
+    def test_auto_auth_path(self):
+        from execution.fyers_adapter import FyersAdapter
+
+        os.environ["FYERS_AUTO_AUTH"] = "true"
+        adapter = FyersAdapter()
+        called = {"auto": False}
+
+        adapter.validate_token = lambda force=False: False
+
+        def _auto():
+            called["auto"] = True
+            return True
+
+        adapter.authenticate_auto = _auto
+
+        self.assertTrue(adapter.ensure_authenticated(interactive=False))
+        self.assertTrue(called["auto"])
+
+    def test_interactive_auth_path(self):
+        from execution.fyers_adapter import FyersAdapter
+
+        os.environ["FYERS_AUTO_AUTH"] = "false"
+        adapter = FyersAdapter()
+        called = {"interactive": False}
+
+        adapter.validate_token = lambda force=False: False
+
+        def _interactive():
+            called["interactive"] = True
+            return True
+
+        adapter.authenticate_interactive = _interactive
+
+        self.assertTrue(adapter.ensure_authenticated(interactive=True))
+        self.assertTrue(called["interactive"])
+
 if __name__ == '__main__':
     unittest.main()
