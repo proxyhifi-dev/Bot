@@ -41,6 +41,10 @@ class TradingEngine:
         self._stop_event = threading.Event()
         self._running = False
         self._engine_thread: Optional[threading.Thread] = None
+        self._evaluation_lock = threading.Lock()
+        self._last_evaluation: Dict[str, Any] = {"event": "not_started"}
+        self._consecutive_engine_errors = 0
+        self._max_consecutive_engine_errors = 10
         self._approval_timeout_thread = threading.Thread(
             target=self._approval_timeout_loop,
             name="approval-timeout-engine",
@@ -89,14 +93,32 @@ class TradingEngine:
     def _engine_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                result = self.evaluate_market()
+                with self._evaluation_lock:
+                    result = self.evaluate_market()
+                    self._last_evaluation = result
+                self._consecutive_engine_errors = 0
                 if result.get("event") in {"risk_block", "no_candles"}:
                     time.sleep(2)
                 else:
                     time.sleep(1)
             except Exception as exc:  # pragma: no cover - defensive safety loop
-                self.logger.exception("engine_loop_error error=%s", exc)
+                self._consecutive_engine_errors += 1
+                self.logger.exception("engine_loop_error error=%s consecutive_errors=%s", exc, self._consecutive_engine_errors)
+                if self._consecutive_engine_errors >= self._max_consecutive_engine_errors:
+                    self._log_event("engine_circuit_breaker", details={"consecutive_errors": self._consecutive_engine_errors})
+                    self._stop_event.set()
+                    self._running = False
+                    break
                 time.sleep(5)
+
+
+    @property
+    def is_running(self) -> bool:
+        return self._running and not self._stop_event.is_set()
+
+    def latest_evaluation(self) -> Dict[str, Any]:
+        with self._evaluation_lock:
+            return dict(self._last_evaluation)
 
     def emergency_stop(self) -> Dict[str, Any]:
         self.stop()
