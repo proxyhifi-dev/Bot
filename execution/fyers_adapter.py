@@ -10,7 +10,7 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -86,6 +86,13 @@ class FyersAdapter:
         # ----------------------------
         self._order_dedupe = set()
         self._order_dedupe_lock = threading.Lock()
+
+        # ----------------------------
+        # Auto Auth Endpoints
+        # ----------------------------
+        self._auto_auth_base_vagator = "https://api-t2.fyers.in/vagator/v2"
+        self._auto_auth_base_token = "https://api-t1.fyers.in/api/v3"
+        self._auto_auth_base_token_v2 = "https://api.fyers.in/api/v2"
 
         self._load_token()
 
@@ -410,41 +417,83 @@ class FyersAdapter:
 
     def _send_login_otp(self) -> str:
         payload = {"fy_id": self.fyers_user_id, "app_id": "2"}
-        resp = self.session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        request_key = data.get("request_key")
-        if not request_key:
-            raise RuntimeError(f"Unable to send OTP: {data}")
-        return request_key
+        endpoints = (
+            f"{self._auto_auth_base_vagator}/send_login_otp_v2",
+            f"{self._auto_auth_base_vagator}/send_login_otp",
+        )
+
+        last_error: Optional[Exception] = None
+        for endpoint in endpoints:
+            try:
+                resp = self.session.post(endpoint, json=payload, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                request_key = data.get("request_key")
+                if request_key:
+                    return request_key
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise RuntimeError(f"Unable to send OTP: {last_error}") from last_error
+        raise RuntimeError("Unable to send OTP: all endpoints failed")
 
     def _verify_totp(self, request_key: str) -> str:
-        totp = self._generate_totp(self.fyers_totp_secret)
-        payload = {"request_key": request_key, "otp": totp}
-        resp = self.session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        verified_request_key = data.get("request_key")
-        if not verified_request_key:
+        # TOTP can fail near window boundaries. Retry with a fresh code.
+        for attempt in range(3):
+            totp = self._generate_totp(self.fyers_totp_secret)
+            payload = {"request_key": request_key, "otp": totp}
+            resp = self.session.post(f"{self._auto_auth_base_vagator}/verify_otp", json=payload, timeout=15)
+
+            # API may return non-200 for invalid/expired OTP; retry quickly.
+            if resp.status_code >= 400:
+                if attempt < 2:
+                    time.sleep(1)
+                    continue
+                resp.raise_for_status()
+
+            data = resp.json()
+            verified_request_key = data.get("request_key")
+            if verified_request_key:
+                return verified_request_key
+
+            if attempt < 2:
+                time.sleep(1)
+                continue
+
             raise RuntimeError(f"Unable to verify TOTP: {data}")
-        return verified_request_key
+
+        raise RuntimeError("Unable to verify TOTP after retries")
 
     def _verify_pin(self, request_key: str) -> str:
         payload = {"request_key": request_key, "identity_type": "pin", "identifier": self.fyers_pin}
-        resp = self.session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json=payload, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        access_token = data.get("data", {}).get("access_token")
-        if not access_token:
-            raise RuntimeError(f"Unable to verify pin: {data}")
-        return access_token
+        endpoints = (
+            f"{self._auto_auth_base_vagator}/verify_pin_v2",
+            f"{self._auto_auth_base_vagator}/verify_pin",
+        )
+
+        last_error: Optional[Exception] = None
+        for endpoint in endpoints:
+            try:
+                resp = self.session.post(endpoint, json=payload, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+                access_token = data.get("data", {}).get("access_token")
+                if access_token:
+                    return access_token
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise RuntimeError(f"Unable to verify pin: {last_error}") from last_error
+        raise RuntimeError("Unable to verify pin: all endpoints failed")
 
     def _request_auth_code(self, pin_access_token: str) -> str:
         payload = {
             "fyers_id": self.fyers_user_id,
             "app_id": self.client_id.split("-")[0],
             "redirect_uri": self.redirect_uri,
-            "appType": "100",
+            "appType": self.client_id.split("-")[1] if "-" in self.client_id else "100",
             "code_challenge": "",
             "state": "auto_auth",
             "scope": "",
@@ -453,13 +502,32 @@ class FyersAdapter:
             "create_cookie": True,
         }
         headers = {"Authorization": f"Bearer {pin_access_token}"}
-        resp = self.session.post("https://api.fyers.in/api/v2/token", json=payload, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        redirect_url = data.get("Url") or data.get("url")
-        if not redirect_url:
-            raise RuntimeError(f"Unable to fetch auth code URL: {data}")
-        auth_code = self._extract_auth_code(redirect_url)
-        if not auth_code:
-            raise RuntimeError(f"Auth code missing in redirect URL: {redirect_url}")
-        return auth_code
+        endpoints = (
+            f"{self._auto_auth_base_token}/token",
+            f"{self._auto_auth_base_token_v2}/token",
+        )
+
+        last_error: Optional[Exception] = None
+        for endpoint in endpoints:
+            try:
+                resp = self.session.post(endpoint, json=payload, headers=headers, timeout=15)
+                if endpoint.endswith("/api/v3/token") and resp.status_code not in (200, 308):
+                    resp.raise_for_status()
+                elif endpoint.endswith("/api/v2/token") and resp.status_code >= 400:
+                    resp.raise_for_status()
+
+                data = resp.json()
+                redirect_url = data.get("Url") or data.get("url")
+                if not redirect_url:
+                    raise RuntimeError(f"Unable to fetch auth code URL: {data}")
+
+                auth_code = self._extract_auth_code(redirect_url)
+                if auth_code:
+                    return auth_code
+                raise RuntimeError(f"Auth code missing in redirect URL: {redirect_url}")
+            except Exception as exc:
+                last_error = exc
+
+        if last_error is not None:
+            raise RuntimeError(f"Unable to request auth code: {last_error}") from last_error
+        raise RuntimeError("Unable to request auth code: all endpoints failed")
