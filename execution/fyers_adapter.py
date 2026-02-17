@@ -343,7 +343,11 @@ class FyersAdapter:
     def _extract_auth_code(value: str) -> str:
         if value.startswith("http"):
             parsed = urlparse(value)
-            return parse_qs(parsed.query).get("code", [""])[0]
+            query = parse_qs(parsed.query)
+            # FYERS callback URLs can include both `code` (status code) and
+            # `auth_code` (actual authorization code). Prefer auth_code when
+            # available to avoid exchanging an HTTP status value like "200".
+            return query.get("auth_code", [""])[0] or query.get("code", [""])[0]
         return value.strip()
 
     def _can_attempt_authentication(self) -> bool:
