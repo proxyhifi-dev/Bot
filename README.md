@@ -276,3 +276,7 @@ Backtest uses real Fyers historical candles (OAuth required).
 4. Restrict network ingress to trusted operator IPs.
 5. Run with reverse proxy (TLS) for UI/API.
 6. Maintain periodic backup of token file and logs.
+
+## Additional Guides
+
+- Fyers TOTP auto-login walkthrough: `docs/fyers_totp_auto_login_guide.md`
